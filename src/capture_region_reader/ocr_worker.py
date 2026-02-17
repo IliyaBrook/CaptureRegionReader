@@ -4,8 +4,10 @@ import os
 import numpy as np
 import pytesseract
 from mss import mss
-from PIL import Image, ImageEnhance, ImageFilter
+from PIL import Image
 from PyQt6.QtCore import QThread, pyqtSignal
+
+from capture_region_reader.text_isolator import isolate_text
 
 
 # Minimum dimensions for good Tesseract accuracy
@@ -50,17 +52,30 @@ def _filter_ocr_garbage(text: str) -> str:
             cyr = sum(1 for c in word if "\u0400" <= c <= "\u04FF")
             lat = sum(1 for c in word if ("A" <= c <= "Z") or ("a" <= c <= "z"))
             word_alpha = cyr + lat
-            # A word with both Cyrillic AND Latin is likely OCR garbage
             if cyr > 0 and lat > 0 and word_alpha >= 3:
                 garbage_words += 1
 
-        # If more than 30% of words are garbage, skip the line
         if len(words) > 0 and garbage_words / len(words) > 0.3:
             continue
 
         good_lines.append(line)
 
     return "\n".join(good_lines)
+
+
+def _upscale(img: Image.Image) -> Image.Image:
+    """Upscale image to minimum dimensions needed for Tesseract accuracy."""
+    w, h = img.size
+    scale = 1
+    if w < MIN_WIDTH:
+        scale = max(scale, (MIN_WIDTH + w - 1) // w)
+    if h < MIN_HEIGHT:
+        scale = max(scale, (MIN_HEIGHT + h - 1) // h)
+    scale = max(scale, 2)
+    scale = min(scale, 4)
+    if scale > 1:
+        img = img.resize((w * scale, h * scale), Image.Resampling.LANCZOS)
+    return img
 
 
 class OcrWorker(QThread):
@@ -75,7 +90,7 @@ class OcrWorker(QThread):
         self._interval_ms: int = 500
         self._running: bool = False
         self._capture_count: int = 0
-        self._last_emitted_text: str = ""  # dedup: don't emit identical text
+        self._last_emitted_text: str = ""
 
     def configure(
         self,
@@ -96,41 +111,6 @@ class OcrWorker(QThread):
 
     def set_interval(self, interval_ms: int) -> None:
         self._interval_ms = interval_ms
-
-    def _preprocess(self, rgb: np.ndarray) -> Image.Image:
-        """Convert RGB array to optimized image for OCR.
-
-        Following the Frog approach: minimal preprocessing.
-        Tesseract's own internal preprocessing (Leptonica) handles
-        binarization better than we can, especially for complex backgrounds.
-        Aggressive binarization turns background logos/text into black text
-        that Tesseract then tries to read as real content.
-
-        We only upscale small images (Tesseract needs ~300 DPI equivalent)
-        and do light contrast enhancement.
-        """
-        img = Image.fromarray(rgb)
-        w, h = img.size
-
-        # Upscale small images to ensure minimum dimensions for Tesseract
-        scale = 1
-        if w < MIN_WIDTH:
-            scale = max(scale, (MIN_WIDTH + w - 1) // w)
-        if h < MIN_HEIGHT:
-            scale = max(scale, (MIN_HEIGHT + h - 1) // h)
-        # At least 2x for better OCR accuracy on screen captures
-        scale = max(scale, 2)
-        scale = min(scale, 4)
-
-        if scale > 1:
-            img = img.resize((w * scale, h * scale), Image.Resampling.LANCZOS)
-
-        # Light contrast boost — helps Tesseract without destroying color info
-        enhancer = ImageEnhance.Contrast(img)
-        img = enhancer.enhance(1.5)
-
-        img = img.filter(ImageFilter.SHARPEN)
-        return img
 
     def run(self) -> None:
         self._running = True
@@ -154,20 +134,28 @@ class OcrWorker(QThread):
 
                     # BGRA → RGB
                     raw_rgb = img_array[:, :, :3][:, :, ::-1].copy()
-                    h_px, w_px = raw_rgb.shape[:2]
-                    self.frame_captured.emit(raw_rgb.tobytes(), w_px, h_px)
+
+                    # Text isolation: detect text contours, crop, clean bg
+                    isolated = isolate_text(raw_rgb)
+
+                    if isolated is not None:
+                        ocr_img = _upscale(Image.fromarray(isolated))
+                    else:
+                        # Fallback: send raw image (upscaled) if isolation fails
+                        ocr_img = _upscale(Image.fromarray(raw_rgb))
+
+                    # Send the processed image to preview so user can debug
+                    preview_rgb = np.array(ocr_img)
+                    p_h, p_w = preview_rgb.shape[:2]
+                    self.frame_captured.emit(preview_rgb.tobytes(), p_w, p_h)
 
                     # Debug saves
                     if DEBUG_SAVE and self._capture_count < 5:
                         Image.fromarray(raw_rgb).save(
                             f"/tmp/crr_raw_{self._capture_count}.png"
                         )
-
-                    processed = self._preprocess(raw_rgb)
-
-                    if DEBUG_SAVE and self._capture_count < 5:
-                        processed.save(
-                            f"/tmp/crr_processed_{self._capture_count}.png"
+                        ocr_img.save(
+                            f"/tmp/crr_isolated_{self._capture_count}.png"
                         )
                         print(
                             f"[OCR] Saved debug captures #{self._capture_count}"
@@ -175,12 +163,12 @@ class OcrWorker(QThread):
 
                     self._capture_count += 1
 
-                    # PSM 3 = fully automatic page segmentation
-                    # OEM 1 = legacy Tesseract engine (consistent results)
+                    # PSM 6 = uniform text block (isolated text is a clean block)
+                    # OEM 1 = legacy engine (consistent)
                     text = pytesseract.image_to_string(
-                        processed,
+                        ocr_img,
                         lang=self._language,
-                        config="--psm 3 --oem 1",
+                        config="--psm 6 --oem 1",
                     ).strip()
 
                     # Filter out garbage and deduplicate

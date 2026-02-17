@@ -107,15 +107,32 @@ class App:
             self._start_reading()
 
     def _grab_single_preview(self, left: int, top: int, width: int, height: int) -> None:
-        """Capture a single frame for the preview right after region selection."""
+        """Capture a single frame for the preview right after region selection.
+
+        Shows the processed (isolated) image so user can see what Tesseract
+        will receive — useful for debugging text detection.
+        """
+        from capture_region_reader.text_isolator import isolate_text
+        from capture_region_reader.ocr_worker import _upscale
+        from PIL import Image
+
         try:
             with mss() as sct:
                 monitor = {"left": left, "top": top, "width": width, "height": height}
                 screenshot = sct.grab(monitor)
                 img_array = np.array(screenshot, dtype=np.uint8)
                 raw_rgb = img_array[:, :, :3][:, :, ::-1].copy()
-                h_px, w_px = raw_rgb.shape[:2]
-                self._window.update_capture_preview(raw_rgb.tobytes(), w_px, h_px)
+
+                # Apply text isolation (same as OCR pipeline)
+                isolated = isolate_text(raw_rgb)
+                if isolated is not None:
+                    preview_img = _upscale(Image.fromarray(isolated))
+                else:
+                    preview_img = _upscale(Image.fromarray(raw_rgb))
+
+                preview_rgb = np.array(preview_img)
+                p_h, p_w = preview_rgb.shape[:2]
+                self._window.update_capture_preview(preview_rgb.tobytes(), p_w, p_h)
         except Exception:
             pass  # non-critical, preview will update when reading starts
 
