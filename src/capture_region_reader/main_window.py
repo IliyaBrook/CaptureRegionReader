@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from PyQt6.QtCore import Qt, pyqtSignal
-from PyQt6.QtGui import QImage, QKeySequence, QPixmap
+from PyQt6.QtGui import QIcon, QImage, QKeySequence, QPixmap
 from PyQt6.QtWidgets import (
     QCheckBox,
     QComboBox,
@@ -19,7 +19,12 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
+from pathlib import Path
+
 from capture_region_reader.settings import AppSettings
+
+# Icon path: assets/icon.png relative to project root
+_ICON_PATH = Path(__file__).resolve().parent.parent.parent / "assets" / "icon.png"
 
 
 class HotkeyRecorder(QLineEdit):
@@ -101,6 +106,8 @@ class MainWindow(QMainWindow):
         self._is_reading = False
 
         self.setWindowTitle("CaptureRegionReader")
+        if _ICON_PATH.exists():
+            self.setWindowIcon(QIcon(str(_ICON_PATH)))
         self.setMinimumSize(500, 800)
 
         central = QWidget()
