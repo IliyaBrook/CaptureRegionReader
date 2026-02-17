@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import sys
 
+import numpy as np
+from mss import mss
 from PyQt6.QtWidgets import QApplication
 
 from capture_region_reader.hotkey_manager import HotkeyManager
@@ -9,6 +11,7 @@ from capture_region_reader.main_window import MainWindow
 from capture_region_reader.ocr_worker import OcrWorker
 from capture_region_reader.region_selector import RegionSelector
 from capture_region_reader.settings import AppSettings
+from capture_region_reader.text_cleaner import clean_for_tts
 from capture_region_reader.text_differ import TextDiffer
 from capture_region_reader.tts_worker import TtsWorker
 
@@ -48,6 +51,7 @@ class App:
 
         # OCR results
         self._ocr_worker.text_recognized.connect(self._on_text_recognized)
+        self._ocr_worker.frame_captured.connect(w.update_capture_preview)
         self._ocr_worker.error_occurred.connect(w.show_error)
 
         # TTS status
@@ -78,6 +82,10 @@ class App:
         # Start TTS thread (waits on queue)
         self._tts_worker.start()
 
+        # Show preview for saved region on startup
+        if s.region:
+            self._grab_single_preview(*s.region)
+
     def _on_select_region(self) -> None:
         was_reading = self._is_reading
         if was_reading:
@@ -94,8 +102,22 @@ class App:
     ) -> None:
         self._window.on_region_selected(left, top, width, height)
         self._text_differ.reset()
+        self._grab_single_preview(left, top, width, height)
         if restart:
             self._start_reading()
+
+    def _grab_single_preview(self, left: int, top: int, width: int, height: int) -> None:
+        """Capture a single frame for the preview right after region selection."""
+        try:
+            with mss() as sct:
+                monitor = {"left": left, "top": top, "width": width, "height": height}
+                screenshot = sct.grab(monitor)
+                img_array = np.array(screenshot, dtype=np.uint8)
+                raw_rgb = img_array[:, :, :3][:, :, ::-1].copy()
+                h_px, w_px = raw_rgb.shape[:2]
+                self._window.update_capture_preview(raw_rgb.tobytes(), w_px, h_px)
+        except Exception:
+            pass  # non-critical, preview will update when reading starts
 
     def _on_toggle_reading(self) -> None:
         if self._is_reading:
@@ -132,7 +154,10 @@ class App:
 
         new_text = self._text_differ.get_new_text(text)
         if new_text:
-            self._tts_worker.speak(new_text)
+            # Clean text for natural TTS reading (remove symbols, OCR artifacts)
+            cleaned = clean_for_tts(new_text)
+            if cleaned:
+                self._tts_worker.speak(cleaned)
 
     def _on_language_changed(self, lang: str) -> None:
         self._ocr_worker.set_language(lang)

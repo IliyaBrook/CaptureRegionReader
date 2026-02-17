@@ -5,7 +5,7 @@ setup: check-deps
 
 check-deps:
 	@which tesseract > /dev/null 2>&1 || (echo "ERROR: tesseract not found. Install with: sudo apt install tesseract-ocr tesseract-ocr-eng tesseract-ocr-rus" && exit 1)
-	@which espeak-ng > /dev/null 2>&1 || (echo "ERROR: espeak-ng not found. Install with: sudo apt install espeak-ng" && exit 1)
+	@which ffplay > /dev/null 2>&1 || (echo "ERROR: ffplay not found. Install with: sudo apt install ffmpeg" && exit 1)
 	@echo "All system dependencies OK"
 
 run: check-deps

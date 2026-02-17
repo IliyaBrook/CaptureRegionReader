@@ -1,8 +1,17 @@
 from __future__ import annotations
 
+import asyncio
+import os
+import subprocess
+import tempfile
 from queue import Empty, Queue
 
 from PyQt6.QtCore import QThread, pyqtSignal
+
+
+# edge-tts voice IDs
+VOICE_EN = "en-US-AndrewNeural"
+VOICE_RU = "ru-RU-DmitryNeural"
 
 
 def detect_language(text: str) -> str:
@@ -25,17 +34,24 @@ class TtsWorker(QThread):
     def __init__(self) -> None:
         super().__init__()
         self._queue: Queue[str | None] = Queue()
-        self._speech_rate: int = 150
-        self._volume: float = 1.0
+        self._speech_rate: str = "+0%"  # edge-tts rate format
+        self._volume: str = "+0%"
         self._auto_language: bool = True
         self._fixed_language: str = "en"
         self._cancel_requested: bool = False
+        self._current_process: subprocess.Popen | None = None
 
     def set_rate(self, rate: int) -> None:
-        self._speech_rate = rate
+        # Convert wpm slider (50-350, default 150) to edge-tts percentage
+        # 150 wpm = +0%, 50 wpm = -67%, 350 wpm = +133%
+        pct = int((rate - 150) / 150 * 100)
+        self._speech_rate = f"{pct:+d}%"
 
     def set_volume(self, volume: float) -> None:
-        self._volume = volume
+        # Convert 0.0-1.0 to edge-tts format
+        # 1.0 = +0%, 0.5 = -50%, 0.0 = -100%
+        pct = int((volume - 1.0) * 100)
+        self._volume = f"{pct:+d}%"
 
     def set_language(self, lang: str) -> None:
         if lang == "eng+rus":
@@ -50,6 +66,10 @@ class TtsWorker(QThread):
 
     def cancel(self) -> None:
         self._cancel_requested = True
+        # Kill current playback if any
+        if self._current_process and self._current_process.poll() is None:
+            self._current_process.terminate()
+        # Drain the queue
         while not self._queue.empty():
             try:
                 self._queue.get_nowait()
@@ -57,7 +77,8 @@ class TtsWorker(QThread):
                 break
 
     def run(self) -> None:
-        import pyttsx3
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
 
         while True:
             try:
@@ -72,40 +93,65 @@ class TtsWorker(QThread):
                 continue
 
             try:
-                engine = pyttsx3.init()
-                engine.setProperty("rate", self._speech_rate)
-                engine.setProperty("volume", self._volume)
-
-                # Select voice based on language
+                # Determine voice
                 if self._auto_language:
-                    target_lang = detect_language(text)
+                    lang = detect_language(text)
                 else:
-                    target_lang = self._fixed_language
+                    lang = self._fixed_language
 
-                voices = engine.getProperty("voices")
-                # espeak-ng voice IDs: "gmw/en-us", "zle/ru", etc.
-                best_voice = None
-                for voice in voices:
-                    vid = voice.id.lower()
-                    if target_lang == "ru" and "/ru" in vid:
-                        best_voice = voice.id
-                        break
-                    elif target_lang == "en" and "/en-us" in vid:
-                        best_voice = voice.id
-                        break
-                    elif target_lang == "en" and "/en" in vid and not best_voice:
-                        best_voice = voice.id
-                if best_voice:
-                    engine.setProperty("voice", best_voice)
+                voice = VOICE_RU if lang == "ru" else VOICE_EN
 
                 self.speech_started.emit()
-                engine.say(text)
-                engine.runAndWait()
-                engine.stop()
+
+                # Generate audio with edge-tts
+                tmp_file = tempfile.mktemp(suffix=".mp3")
+                try:
+                    loop.run_until_complete(
+                        self._generate_audio(text, voice, tmp_file)
+                    )
+
+                    if self._cancel_requested:
+                        continue
+
+                    # Play audio with ffplay
+                    self._current_process = subprocess.Popen(
+                        [
+                            "ffplay",
+                            "-nodisp",
+                            "-autoexit",
+                            "-loglevel",
+                            "error",
+                            tmp_file,
+                        ],
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.DEVNULL,
+                    )
+                    self._current_process.wait()
+                    self._current_process = None
+                finally:
+                    try:
+                        os.unlink(tmp_file)
+                    except OSError:
+                        pass
+
                 self.speech_finished.emit()
             except Exception as e:
                 self.error_occurred.emit(str(e))
 
+        loop.close()
+
+    async def _generate_audio(self, text: str, voice: str, output_path: str) -> None:
+        import edge_tts
+
+        communicate = edge_tts.Communicate(
+            text,
+            voice,
+            rate=self._speech_rate,
+            volume=self._volume,
+        )
+        await communicate.save(output_path)
+
     def shutdown(self) -> None:
+        self.cancel()
         self._queue.put(None)
-        self.wait(3000)
+        self.wait(5000)

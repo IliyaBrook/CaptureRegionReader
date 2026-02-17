@@ -43,19 +43,18 @@ class RegionSelector(QWidget):
         painter.fillRect(self.rect(), overlay_color)
 
         if self._start_pos and self._current_pos:
-            # Calculate selection rectangle in widget coordinates
             sel_rect = QRect(
                 self.mapFromGlobal(self._start_pos),
                 self.mapFromGlobal(self._current_pos),
             ).normalized()
 
-            # Clear the selected area (make it transparent)
+            # Clear the selected area
             painter.setCompositionMode(
                 QPainter.CompositionMode.CompositionMode_Clear
             )
             painter.fillRect(sel_rect, Qt.GlobalColor.transparent)
 
-            # Draw border around selection
+            # Draw green border
             painter.setCompositionMode(
                 QPainter.CompositionMode.CompositionMode_SourceOver
             )
@@ -63,16 +62,12 @@ class RegionSelector(QWidget):
             painter.setPen(pen)
             painter.drawRect(sel_rect)
 
-            # Draw size label
+            # Show size label
             w = sel_rect.width()
             h = sel_rect.height()
             label = f"{w} x {h}"
             painter.setPen(QColor(255, 255, 255))
-            painter.drawText(
-                sel_rect.left() + 4,
-                sel_rect.top() - 6,
-                label,
-            )
+            painter.drawText(sel_rect.left() + 4, sel_rect.top() - 6, label)
 
         painter.end()
 
@@ -90,6 +85,7 @@ class RegionSelector(QWidget):
         if event.button() == Qt.MouseButton.LeftButton and self._start_pos:
             end_pos = event.globalPosition().toPoint()
 
+            # Qt globalPosition coordinates match mss coordinates on X11
             x1 = min(self._start_pos.x(), end_pos.x())
             y1 = min(self._start_pos.y(), end_pos.y())
             x2 = max(self._start_pos.x(), end_pos.x())

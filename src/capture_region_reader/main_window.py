@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from PyQt6.QtCore import Qt, pyqtSignal
-from PyQt6.QtGui import QKeySequence
+from PyQt6.QtGui import QImage, QKeySequence, QPixmap
 from PyQt6.QtWidgets import (
     QComboBox,
     QGroupBox,
@@ -10,6 +10,7 @@ from PyQt6.QtWidgets import (
     QLineEdit,
     QMainWindow,
     QPushButton,
+    QScrollArea,
     QSlider,
     QStatusBar,
     QTextEdit,
@@ -98,7 +99,7 @@ class MainWindow(QMainWindow):
         self._is_reading = False
 
         self.setWindowTitle("CaptureRegionReader")
-        self.setMinimumSize(500, 650)
+        self.setMinimumSize(500, 800)
 
         central = QWidget()
         self.setCentralWidget(central)
@@ -239,6 +240,46 @@ class MainWindow(QMainWindow):
 
         layout.addWidget(text_group)
 
+        # --- Capture preview ---
+        preview_group = QGroupBox("Capture Preview")
+        preview_layout = QVBoxLayout(preview_group)
+
+        # Toolbar: Fit/1:1 toggle + size info
+        preview_toolbar = QHBoxLayout()
+        self._btn_preview_fit = QPushButton("Fit")
+        self._btn_preview_fit.setCheckable(True)
+        self._btn_preview_fit.setChecked(True)
+        self._btn_preview_fit.setMaximumWidth(60)
+        self._btn_preview_fit.clicked.connect(self._on_preview_fit_toggled)
+        preview_toolbar.addWidget(self._btn_preview_fit)
+        self._lbl_preview_info = QLabel("")
+        self._lbl_preview_info.setStyleSheet("QLabel { color: #888; font-size: 11px; }")
+        preview_toolbar.addWidget(self._lbl_preview_info)
+        preview_toolbar.addStretch()
+        preview_layout.addLayout(preview_toolbar)
+
+        # Scrollable image area
+        self._preview_scroll = QScrollArea()
+        self._preview_scroll.setMinimumHeight(120)
+        self._preview_scroll.setStyleSheet(
+            "QScrollArea { background-color: #1a1a1a; border: 1px solid #333; }"
+        )
+        self._preview_scroll.setWidgetResizable(False)
+
+        self._capture_preview = QLabel("Capture preview will appear here...")
+        self._capture_preview.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._capture_preview.setStyleSheet(
+            "QLabel { background-color: #1a1a1a; color: #666; padding: 4px; }"
+        )
+        self._preview_scroll.setWidget(self._capture_preview)
+
+        preview_layout.addWidget(self._preview_scroll)
+
+        self._preview_fit_mode = True
+        self._preview_original_pixmap: QPixmap | None = None
+
+        layout.addWidget(preview_group)
+
         # --- Status bar ---
         self._status_bar = QStatusBar()
         self.setStatusBar(self._status_bar)
@@ -306,6 +347,38 @@ class MainWindow(QMainWindow):
 
     def update_text_display(self, text: str) -> None:
         self._text_display.setPlainText(text)
+
+    def update_capture_preview(self, raw_bytes: bytes, width: int, height: int) -> None:
+        """Update the capture preview with the latest screenshot frame."""
+        qimg = QImage(raw_bytes, width, height, width * 3, QImage.Format.Format_RGB888)
+        self._preview_original_pixmap = QPixmap.fromImage(qimg)
+        self._lbl_preview_info.setText(f"{width}x{height} px")
+        self._apply_preview_pixmap()
+
+    def _apply_preview_pixmap(self) -> None:
+        """Apply the stored pixmap in Fit or 1:1 mode."""
+        if self._preview_original_pixmap is None:
+            return
+        if self._preview_fit_mode:
+            # Scale to fit scroll area width
+            scroll_w = self._preview_scroll.viewport().width() - 4
+            if scroll_w > 0 and self._preview_original_pixmap.width() > scroll_w:
+                scaled = self._preview_original_pixmap.scaledToWidth(
+                    scroll_w, Qt.TransformationMode.SmoothTransformation
+                )
+            else:
+                scaled = self._preview_original_pixmap
+            self._capture_preview.setPixmap(scaled)
+            self._capture_preview.resize(scaled.size())
+        else:
+            # 1:1 — full resolution, scrollable
+            self._capture_preview.setPixmap(self._preview_original_pixmap)
+            self._capture_preview.resize(self._preview_original_pixmap.size())
+
+    def _on_preview_fit_toggled(self) -> None:
+        self._preview_fit_mode = self._btn_preview_fit.isChecked()
+        self._btn_preview_fit.setText("Fit" if self._preview_fit_mode else "1:1")
+        self._apply_preview_pixmap()
 
     def show_status(self, message: str) -> None:
         self._status_bar.showMessage(message)
