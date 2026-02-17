@@ -5,7 +5,44 @@ from PyQt6.QtGui import QPainter, QColor, QPen, QGuiApplication
 from PyQt6.QtWidgets import QWidget
 
 
+def qt_point_to_physical(qt_x: int, qt_y: int) -> tuple[int, int]:
+    """Convert a Qt global coordinate to physical X11/mss coordinate.
+
+    Qt with QT_SCREEN_SCALE_FACTORS uses a mixed coordinate space on X11:
+    - Screen origins (QScreen.geometry().x/y) are in PHYSICAL pixels
+    - Screen sizes (QScreen.geometry().width/height) are in LOGICAL pixels
+    - Mouse globalPosition() returns coords in this mixed space
+
+    MSS expects pure physical X11 root window coordinates.
+
+    To convert: find which screen the point is on, compute the offset
+    within that screen in logical pixels, multiply by DPR, and add to
+    the screen's physical origin.
+    """
+    screens = QGuiApplication.screens()
+    for screen in screens:
+        geo = screen.geometry()
+        if geo.contains(qt_x, qt_y):
+            dpr = screen.devicePixelRatio()
+            # Offset within screen in logical pixels
+            offset_x = qt_x - geo.x()
+            offset_y = qt_y - geo.y()
+            # Convert to physical: origin (already physical) + offset * DPR
+            phys_x = int(geo.x() + offset_x * dpr)
+            phys_y = int(geo.y() + offset_y * dpr)
+            return phys_x, phys_y
+
+    # Fallback: point not on any screen (e.g., in a gap between screens)
+    # Try to find the nearest screen and use its DPR
+    if screens:
+        # Use first screen's DPR as fallback
+        dpr = screens[0].devicePixelRatio()
+        return int(qt_x * dpr), int(qt_y * dpr)
+    return qt_x, qt_y
+
+
 class RegionSelector(QWidget):
+    # Signal emits PHYSICAL pixel coordinates for mss
     region_selected = pyqtSignal(int, int, int, int)  # left, top, width, height
 
     def __init__(self) -> None:
@@ -14,6 +51,7 @@ class RegionSelector(QWidget):
         self._current_pos: QPoint | None = None
 
         # Compute virtual desktop geometry spanning all monitors
+        # Qt reports this in its mixed coordinate space
         screens = QGuiApplication.screens()
         if screens:
             combined = screens[0].geometry()
@@ -62,10 +100,18 @@ class RegionSelector(QWidget):
             painter.setPen(pen)
             painter.drawRect(sel_rect)
 
-            # Show size label
-            w = sel_rect.width()
-            h = sel_rect.height()
-            label = f"{w} x {h}"
+            # Show size label (physical pixels for accuracy)
+            p1 = qt_point_to_physical(
+                min(self._start_pos.x(), self._current_pos.x()),
+                min(self._start_pos.y(), self._current_pos.y()),
+            )
+            p2 = qt_point_to_physical(
+                max(self._start_pos.x(), self._current_pos.x()),
+                max(self._start_pos.y(), self._current_pos.y()),
+            )
+            pw = p2[0] - p1[0]
+            ph = p2[1] - p1[1]
+            label = f"{pw} x {ph} px"
             painter.setPen(QColor(255, 255, 255))
             painter.drawText(sel_rect.left() + 4, sel_rect.top() - 6, label)
 
@@ -85,16 +131,26 @@ class RegionSelector(QWidget):
         if event.button() == Qt.MouseButton.LeftButton and self._start_pos:
             end_pos = event.globalPosition().toPoint()
 
-            # Qt globalPosition coordinates match mss coordinates on X11
-            x1 = min(self._start_pos.x(), end_pos.x())
-            y1 = min(self._start_pos.y(), end_pos.y())
-            x2 = max(self._start_pos.x(), end_pos.x())
-            y2 = max(self._start_pos.y(), end_pos.y())
+            # Convert Qt mixed coordinates to physical X11 coordinates for mss
+            phys_start = qt_point_to_physical(
+                self._start_pos.x(), self._start_pos.y()
+            )
+            phys_end = qt_point_to_physical(end_pos.x(), end_pos.y())
+
+            x1 = min(phys_start[0], phys_end[0])
+            y1 = min(phys_start[1], phys_end[1])
+            x2 = max(phys_start[0], phys_end[0])
+            y2 = max(phys_start[1], phys_end[1])
 
             width = x2 - x1
             height = y2 - y1
 
             if width > 10 and height > 10:
+                print(
+                    f"[Region] Qt start=({self._start_pos.x()},{self._start_pos.y()}) "
+                    f"end=({end_pos.x()},{end_pos.y()}) → "
+                    f"Physical ({x1},{y1}) {width}x{height}"
+                )
                 self.region_selected.emit(x1, y1, width, height)
 
             self.close()
