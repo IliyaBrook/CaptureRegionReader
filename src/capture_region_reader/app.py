@@ -69,7 +69,6 @@ class App:
         w.volume_changed.connect(self._tts_worker.set_volume)
         w.hotkey_changed.connect(self._hotkey_manager.set_hotkey)
         w.interval_changed.connect(self._ocr_worker.set_interval)
-        w.subtitle_mode_changed.connect(self._ocr_worker.set_subtitle_mode)
 
     def _apply_settings(self) -> None:
         s = self._settings
@@ -78,7 +77,6 @@ class App:
         self._tts_worker.set_language(s.language)
         self._ocr_worker.set_language(s.language)
         self._ocr_worker.set_interval(s.ocr_interval_ms)
-        self._ocr_worker.set_subtitle_mode(s.subtitle_mode)
         self._hotkey_manager.set_hotkey(s.hotkey)
 
         # Start TTS thread (waits on queue)

@@ -93,7 +93,6 @@ class MainWindow(QMainWindow):
     volume_changed = pyqtSignal(float)
     hotkey_changed = pyqtSignal(str)
     interval_changed = pyqtSignal(int)
-    subtitle_mode_changed = pyqtSignal(bool)
 
     def __init__(self, settings: AppSettings) -> None:
         super().__init__()
@@ -185,19 +184,6 @@ class MainWindow(QMainWindow):
         self._combo_lang.currentIndexChanged.connect(self._on_lang_changed)
         lang_row.addWidget(self._combo_lang, stretch=1)
         lang_layout.addLayout(lang_row)
-
-        # Subtitle mode checkbox
-        self._chk_subtitle = QCheckBox(
-            "Subtitle mode (auto-detect subtitle background)"
-        )
-        self._chk_subtitle.setChecked(settings.subtitle_mode)
-        self._chk_subtitle.setToolTip(
-            "When enabled, automatically finds dark subtitle backgrounds\n"
-            "(like YouTube or game cutscenes) and reads only that area,\n"
-            "ignoring other text in the selected region."
-        )
-        self._chk_subtitle.toggled.connect(self._on_subtitle_mode_changed)
-        lang_layout.addWidget(self._chk_subtitle)
 
         layout.addWidget(lang_group)
 
@@ -333,10 +319,6 @@ class MainWindow(QMainWindow):
         self._lbl_interval.setText(f"{value} ms")
         self.settings.ocr_interval_ms = value
         self.interval_changed.emit(value)
-
-    def _on_subtitle_mode_changed(self, checked: bool) -> None:
-        self.settings.subtitle_mode = checked
-        self.subtitle_mode_changed.emit(checked)
 
     # --- Public methods for app.py to call ---
 

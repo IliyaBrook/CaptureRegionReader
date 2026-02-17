@@ -12,7 +12,6 @@ class AppSettings:
     speech_rate: int = 150
     volume: float = 1.0
     ocr_interval_ms: int = 500
-    subtitle_mode: bool = False  # auto-detect subtitle background regions
 
     def save(self) -> None:
         s = QSettings("CaptureRegionReader", "CaptureRegionReader")
@@ -28,7 +27,6 @@ class AppSettings:
         s.setValue("speech_rate", self.speech_rate)
         s.setValue("volume", self.volume)
         s.setValue("ocr_interval_ms", self.ocr_interval_ms)
-        s.setValue("subtitle_mode", self.subtitle_mode)
 
     @classmethod
     def load(cls) -> AppSettings:
@@ -48,5 +46,4 @@ class AppSettings:
             speech_rate=int(s.value("speech_rate", 150)),
             volume=float(s.value("volume", 1.0)),
             ocr_interval_ms=int(s.value("ocr_interval_ms", 500)),
-            subtitle_mode=s.value("subtitle_mode", False) in (True, "true", "True", 1, "1"),
         )
