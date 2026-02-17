@@ -92,6 +92,7 @@ class MainWindow(QMainWindow):
     rate_changed = pyqtSignal(int)
     volume_changed = pyqtSignal(float)
     hotkey_changed = pyqtSignal(str)
+    select_region_hotkey_changed = pyqtSignal(str)
     interval_changed = pyqtSignal(int)
 
     def __init__(self, settings: AppSettings) -> None:
@@ -151,16 +152,30 @@ class MainWindow(QMainWindow):
         layout.addWidget(controls_group)
 
         # --- Hotkey section ---
-        hotkey_group = QGroupBox("Hotkey (Toggle Start/Stop)")
-        hotkey_layout = QHBoxLayout(hotkey_group)
+        hotkey_group = QGroupBox("Hotkeys")
+        hotkey_layout = QVBoxLayout(hotkey_group)
 
+        # Toggle Start/Stop hotkey
+        toggle_row = QHBoxLayout()
+        toggle_row.addWidget(QLabel("Start/Stop:"))
         self._hotkey_edit = HotkeyRecorder(settings.hotkey)
         self._hotkey_edit.hotkey_recorded.connect(self._on_hotkey_recorded)
-        hotkey_layout.addWidget(self._hotkey_edit, stretch=1)
-
+        toggle_row.addWidget(self._hotkey_edit, stretch=1)
         self._btn_record = QPushButton("Record")
         self._btn_record.clicked.connect(self._hotkey_edit.start_recording)
-        hotkey_layout.addWidget(self._btn_record)
+        toggle_row.addWidget(self._btn_record)
+        hotkey_layout.addLayout(toggle_row)
+
+        # Select Region hotkey
+        region_hotkey_row = QHBoxLayout()
+        region_hotkey_row.addWidget(QLabel("Select Region:"))
+        self._region_hotkey_edit = HotkeyRecorder(settings.select_region_hotkey)
+        self._region_hotkey_edit.hotkey_recorded.connect(self._on_region_hotkey_recorded)
+        region_hotkey_row.addWidget(self._region_hotkey_edit, stretch=1)
+        self._btn_record_region = QPushButton("Record")
+        self._btn_record_region.clicked.connect(self._region_hotkey_edit.start_recording)
+        region_hotkey_row.addWidget(self._btn_record_region)
+        hotkey_layout.addLayout(region_hotkey_row)
 
         layout.addWidget(hotkey_group)
 
@@ -298,6 +313,10 @@ class MainWindow(QMainWindow):
     def _on_hotkey_recorded(self, combo: str) -> None:
         self.settings.hotkey = combo
         self.hotkey_changed.emit(combo)
+
+    def _on_region_hotkey_recorded(self, combo: str) -> None:
+        self.settings.select_region_hotkey = combo
+        self.select_region_hotkey_changed.emit(combo)
 
     def _on_lang_changed(self, index: int) -> None:
         lang = self._combo_lang.itemData(index)

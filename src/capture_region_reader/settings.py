@@ -9,6 +9,7 @@ class AppSettings:
     region: tuple[int, int, int, int] | None = None  # (left, top, width, height)
     language: str = "eng+rus"
     hotkey: str = "Ctrl+Alt+R"
+    select_region_hotkey: str = "Ctrl+Alt+S"
     speech_rate: int = 150
     volume: float = 1.0
     ocr_interval_ms: int = 500
@@ -24,6 +25,7 @@ class AppSettings:
             s.remove("region")
         s.setValue("language", self.language)
         s.setValue("hotkey", self.hotkey)
+        s.setValue("select_region_hotkey", self.select_region_hotkey)
         s.setValue("speech_rate", self.speech_rate)
         s.setValue("volume", self.volume)
         s.setValue("ocr_interval_ms", self.ocr_interval_ms)
@@ -43,6 +45,7 @@ class AppSettings:
             region=region,
             language=str(s.value("language", "eng+rus")),
             hotkey=str(s.value("hotkey", "Ctrl+Alt+R")),
+            select_region_hotkey=str(s.value("select_region_hotkey", "Ctrl+Alt+S")),
             speech_rate=int(s.value("speech_rate", 150)),
             volume=float(s.value("volume", 1.0)),
             ocr_interval_ms=int(s.value("ocr_interval_ms", 500)),

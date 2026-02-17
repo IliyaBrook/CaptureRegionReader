@@ -49,6 +49,9 @@ class App:
         w.toggle_reading.connect(self._on_toggle_reading)
         self._hotkey_manager.hotkey_triggered.connect(self._on_toggle_reading)
 
+        # Select region hotkey
+        self._hotkey_manager.select_region_triggered.connect(self._on_select_region)
+
         # OCR results
         self._ocr_worker.text_recognized.connect(self._on_text_recognized)
         self._ocr_worker.frame_captured.connect(w.update_capture_preview)
@@ -68,6 +71,7 @@ class App:
         w.rate_changed.connect(self._tts_worker.set_rate)
         w.volume_changed.connect(self._tts_worker.set_volume)
         w.hotkey_changed.connect(self._hotkey_manager.set_hotkey)
+        w.select_region_hotkey_changed.connect(self._hotkey_manager.set_select_region_hotkey)
         w.interval_changed.connect(self._ocr_worker.set_interval)
 
     def _apply_settings(self) -> None:
@@ -78,6 +82,7 @@ class App:
         self._ocr_worker.set_language(s.language)
         self._ocr_worker.set_interval(s.ocr_interval_ms)
         self._hotkey_manager.set_hotkey(s.hotkey)
+        self._hotkey_manager.set_select_region_hotkey(s.select_region_hotkey)
 
         # Start TTS thread (waits on queue)
         self._tts_worker.start()

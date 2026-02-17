@@ -92,22 +92,6 @@ class TtsWorker(QThread):
             if self._cancel_requested:
                 continue
 
-            # Skip stale items: if there are newer items in the queue,
-            # drain to the latest one (avoid speaking outdated text)
-            while not self._queue.empty():
-                try:
-                    next_text = self._queue.get_nowait()
-                    if next_text is None:
-                        # Shutdown signal — put it back and process current
-                        self._queue.put(None)
-                        break
-                    text = next_text  # skip to newer text
-                except Empty:
-                    break
-
-            if self._cancel_requested:
-                continue
-
             try:
                 # Determine voice
                 if self._auto_language:
