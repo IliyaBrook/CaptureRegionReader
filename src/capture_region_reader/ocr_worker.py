@@ -187,6 +187,7 @@ class OcrWorker(QThread):
         self._running: bool = False
         self._capture_count: int = 0
         self._subtitle_mode: bool = False
+        self._last_emitted_text: str = ""  # dedup: don't emit identical text
 
     def configure(
         self,
@@ -198,6 +199,7 @@ class OcrWorker(QThread):
         self._language = language
         self._interval_ms = interval_ms
         self._capture_count = 0
+        self._last_emitted_text = ""
         print(f"[OCR] Configured region: left={region[0]}, top={region[1]}, "
               f"width={region[2]}, height={region[3]}, lang={language}, "
               f"subtitle_mode={self._subtitle_mode}")
@@ -312,24 +314,23 @@ class OcrWorker(QThread):
 
                     self._capture_count += 1
 
-                    # In subtitle mode with a specific language selected,
-                    # use ONLY that language for Tesseract to avoid
-                    # misreading scene text in wrong language as garbage.
                     ocr_lang = self._language
-                    if self._subtitle_mode and ocr_lang == "eng+rus":
-                        # Auto mode in subtitle: still use both
-                        pass
+
+                    # PSM 6 = uniform text block (best for subtitles)
+                    # PSM 3 = fully automatic (better for mixed content)
+                    psm = 6 if self._subtitle_mode else 3
 
                     text = pytesseract.image_to_string(
                         processed,
                         lang=ocr_lang,
-                        config="--psm 6 --oem 1",
+                        config=f"--psm {psm} --oem 1",
                     ).strip()
 
-                    # Filter out garbage
+                    # Filter out garbage and deduplicate
                     if text:
                         text = _filter_ocr_garbage(text)
-                        if text:
+                        if text and text != self._last_emitted_text:
+                            self._last_emitted_text = text
                             self.text_recognized.emit(text)
                 except Exception as e:
                     self.error_occurred.emit(str(e))
