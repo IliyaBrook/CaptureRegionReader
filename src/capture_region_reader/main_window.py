@@ -3,6 +3,7 @@ from __future__ import annotations
 from PyQt6.QtCore import Qt, pyqtSignal
 from PyQt6.QtGui import QImage, QKeySequence, QPixmap
 from PyQt6.QtWidgets import (
+    QCheckBox,
     QComboBox,
     QGroupBox,
     QHBoxLayout,
@@ -92,6 +93,7 @@ class MainWindow(QMainWindow):
     volume_changed = pyqtSignal(float)
     hotkey_changed = pyqtSignal(str)
     interval_changed = pyqtSignal(int)
+    subtitle_mode_changed = pyqtSignal(bool)
 
     def __init__(self, settings: AppSettings) -> None:
         super().__init__()
@@ -163,10 +165,12 @@ class MainWindow(QMainWindow):
 
         layout.addWidget(hotkey_group)
 
-        # --- Language section ---
-        lang_group = QGroupBox("Language")
-        lang_layout = QHBoxLayout(lang_group)
+        # --- Language & OCR mode section ---
+        lang_group = QGroupBox("Language && OCR Mode")
+        lang_layout = QVBoxLayout(lang_group)
 
+        lang_row = QHBoxLayout()
+        lang_row.addWidget(QLabel("Language:"))
         self._combo_lang = QComboBox()
         self._combo_lang.addItem("Auto (English + Russian)", "eng+rus")
         self._combo_lang.addItem("English", "eng")
@@ -179,7 +183,22 @@ class MainWindow(QMainWindow):
                 break
 
         self._combo_lang.currentIndexChanged.connect(self._on_lang_changed)
-        lang_layout.addWidget(self._combo_lang)
+        lang_row.addWidget(self._combo_lang, stretch=1)
+        lang_layout.addLayout(lang_row)
+
+        # Subtitle mode checkbox
+        self._chk_subtitle = QCheckBox(
+            "Subtitle mode (auto-detect subtitle background)"
+        )
+        self._chk_subtitle.setChecked(settings.subtitle_mode)
+        self._chk_subtitle.setToolTip(
+            "When enabled, automatically finds dark subtitle backgrounds\n"
+            "(like YouTube or game cutscenes) and reads only that area,\n"
+            "ignoring other text in the selected region."
+        )
+        self._chk_subtitle.toggled.connect(self._on_subtitle_mode_changed)
+        lang_layout.addWidget(self._chk_subtitle)
+
         layout.addWidget(lang_group)
 
         # --- Speech settings ---
@@ -314,6 +333,10 @@ class MainWindow(QMainWindow):
         self._lbl_interval.setText(f"{value} ms")
         self.settings.ocr_interval_ms = value
         self.interval_changed.emit(value)
+
+    def _on_subtitle_mode_changed(self, checked: bool) -> None:
+        self.settings.subtitle_mode = checked
+        self.subtitle_mode_changed.emit(checked)
 
     # --- Public methods for app.py to call ---
 

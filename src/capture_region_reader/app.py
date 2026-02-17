@@ -11,7 +11,7 @@ from capture_region_reader.main_window import MainWindow
 from capture_region_reader.ocr_worker import OcrWorker
 from capture_region_reader.region_selector import RegionSelector
 from capture_region_reader.settings import AppSettings
-from capture_region_reader.text_cleaner import clean_for_tts
+from capture_region_reader.text_cleaner import clean_for_tts, filter_by_language
 from capture_region_reader.text_differ import TextDiffer
 from capture_region_reader.tts_worker import TtsWorker
 
@@ -69,6 +69,7 @@ class App:
         w.volume_changed.connect(self._tts_worker.set_volume)
         w.hotkey_changed.connect(self._hotkey_manager.set_hotkey)
         w.interval_changed.connect(self._ocr_worker.set_interval)
+        w.subtitle_mode_changed.connect(self._ocr_worker.set_subtitle_mode)
 
     def _apply_settings(self) -> None:
         s = self._settings
@@ -77,6 +78,7 @@ class App:
         self._tts_worker.set_language(s.language)
         self._ocr_worker.set_language(s.language)
         self._ocr_worker.set_interval(s.ocr_interval_ms)
+        self._ocr_worker.set_subtitle_mode(s.subtitle_mode)
         self._hotkey_manager.set_hotkey(s.hotkey)
 
         # Start TTS thread (waits on queue)
@@ -150,6 +152,9 @@ class App:
         self._window.show_status("Stopped")
 
     def _on_text_recognized(self, text: str) -> None:
+        # Apply language filter first (removes lines with wrong language)
+        text = filter_by_language(text, self._settings.language)
+
         self._window.update_text_display(text)
 
         new_text = self._text_differ.get_new_text(text)
