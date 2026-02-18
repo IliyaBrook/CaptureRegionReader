@@ -34,13 +34,10 @@ class TextDiffer:
         if norm_old == norm_new:
             return None
 
-        ratio = SequenceMatcher(None, norm_old, norm_new).ratio()
-
-        # High similarity = OCR jitter, not a real change
-        if ratio >= self._threshold:
-            return None
-
-        # Check if text grew (scrolling/streaming subtitles)
+        # Check if text grew BEFORE similarity check.
+        # When a subtitle adds a second line, similarity can be 0.85-0.95
+        # (mostly the same text + new line), which would be incorrectly
+        # rejected as "OCR jitter" if we checked similarity first.
         old_lines = self._last_text.strip().splitlines()
         new_lines = current_text.strip().splitlines()
 
@@ -61,6 +58,12 @@ class TextDiffer:
                 new_portion = "\n".join(new_lines[overlap:])
                 self._last_text = current_text
                 return new_portion.strip() if new_portion.strip() else None
+
+        ratio = SequenceMatcher(None, norm_old, norm_new).ratio()
+
+        # High similarity = OCR jitter, not a real change
+        if ratio >= self._threshold:
+            return None
 
         # Text changed substantially — return new text
         self._last_text = current_text

@@ -291,29 +291,41 @@ def _select_subtitle_lines(
 
     # Pass 1: always include the best line
     result: list[list[CharBox]] = [best_line]
+    # Track y-centers of accepted lines for proximity to nearest neighbor
+    accepted_ys: list[float] = [best_y]
 
     # Pass 2: include nearby lines that are part of the same subtitle block.
     # A companion line must:
-    #   - have similar character height (within 40% of best)
-    #   - be vertically close (within 2.5x the char height of best line)
+    #   - have similar character height (within 50% of best)
+    #   - be vertically close to ANY already-accepted line (not just best)
     #   - have a minimum score (not total garbage)
-    for score, line, y_center, avg_h in scored[1:]:
-        if len(result) >= 4:
-            break
+    # We loop multiple times so line 3 can be accepted via proximity to line 2.
+    remaining = [(score, line, y_center, avg_h) for score, line, y_center, avg_h in scored[1:]]
+    changed = True
+    while changed and len(result) < 6:
+        changed = False
+        still_remaining = []
+        for score, line, y_center, avg_h in remaining:
+            # Check character height similarity
+            h_ratio = avg_h / (best_h + 1)
+            if h_ratio < 0.5 or h_ratio > 1.8:
+                still_remaining.append((score, line, y_center, avg_h))
+                continue
 
-        # Check character height similarity
-        h_ratio = avg_h / (best_h + 1)
-        if h_ratio < 0.6 or h_ratio > 1.6:
-            continue
+            # Check vertical proximity to nearest accepted line
+            min_dist = min(abs(y_center - ay) for ay in accepted_ys)
+            if min_dist > best_h * 2.0:
+                still_remaining.append((score, line, y_center, avg_h))
+                continue
 
-        # Check vertical proximity: must be within ~2.5 line heights
-        y_dist = abs(y_center - best_y)
-        if y_dist > best_h * 2.5:
-            continue
-
-        # Minimum quality: must have at least some substance
-        if score > 5:
-            result.append(line)
+            # Minimum quality: must have at least some substance
+            if score > 5:
+                result.append(line)
+                accepted_ys.append(y_center)
+                changed = True
+            else:
+                still_remaining.append((score, line, y_center, avg_h))
+        remaining = still_remaining
 
     result.sort(key=lambda line: np.mean([c[0][1] for c in line]))
     return result

@@ -208,8 +208,15 @@ class OcrWorker(QThread):
                             print(f"[OCR] After filter: {repr(filtered[:200] if filtered else '<empty>')}")
                         text = filtered
                         if text and text != self._last_emitted_text:
-                            self._last_emitted_text = text
-                            self.text_recognized.emit(text)
+                            # Skip if new text is a subset of what we already
+                            # emitted (OCR caught only 1 of 2 lines this frame).
+                            norm_new = " ".join(text.split())
+                            norm_old = " ".join(self._last_emitted_text.split())
+                            if norm_new and norm_old and norm_new in norm_old:
+                                print(f"[OCR] Skip subset of last")
+                            else:
+                                self._last_emitted_text = text
+                                self.text_recognized.emit(text)
                         elif text and text == self._last_emitted_text:
                             print(f"[OCR] Dedup: same as last")
                 except Exception as e:
