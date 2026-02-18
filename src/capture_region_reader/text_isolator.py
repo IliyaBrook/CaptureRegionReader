@@ -312,9 +312,14 @@ def _select_subtitle_lines(
                 still_remaining.append((score, line, y_center, avg_h))
                 continue
 
-            # Check vertical proximity to nearest accepted line
+            # Check vertical proximity to nearest accepted line.
+            # Use the larger char height of the two lines for a robust check.
+            # Subtitle line spacing (leading) is typically 1.2-1.5x font size,
+            # but contour height < font em-height, so center-to-center distance
+            # can be 2.2-2.5x contour height.  Use 3.0x for safe headroom.
+            ref_h = max(avg_h, best_h)
             min_dist = min(abs(y_center - ay) for ay in accepted_ys)
-            if min_dist > best_h * 2.0:
+            if min_dist > ref_h * 3.0:
                 still_remaining.append((score, line, y_center, avg_h))
                 continue
 
