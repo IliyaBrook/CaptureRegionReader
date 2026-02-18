@@ -133,7 +133,7 @@ class App:
                 if isolated is not None:
                     preview_img = _upscale(Image.fromarray(isolated))
                 else:
-                    preview_img = _upscale(Image.fromarray(raw_rgb))
+                    preview_img = Image.fromarray(raw_rgb)
 
                 preview_rgb = np.array(preview_img)
                 p_h, p_w = preview_rgb.shape[:2]

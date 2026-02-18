@@ -1,4 +1,4 @@
-.PHONY: setup run dev clean check-deps
+.PHONY: setup run dev debug clean check-deps
 
 setup: check-deps
 	uv sync
@@ -13,6 +13,9 @@ run: check-deps
 
 dev: check-deps
 	uv run python -m capture_region_reader
+
+debug: check-deps
+	CRR_DEBUG=1 uv run capture-region-reader
 
 clean:
 	rm -rf .venv __pycache__ dist build *.egg-info src/capture_region_reader/__pycache__

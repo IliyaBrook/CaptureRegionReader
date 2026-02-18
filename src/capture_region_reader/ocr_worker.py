@@ -58,9 +58,34 @@ def _filter_ocr_garbage(text: str) -> str:
         if len(words) > 0 and garbage_words / len(words) > 0.3:
             continue
 
+        # Reject lines dominated by short words (1-2 chars).
+        # Garbage like "ООО ООО О Ооо бо И О" is mostly tiny words.
+        if len(words) >= 3:
+            short_words = sum(1 for w in words if len(w) <= 2)
+            if short_words / len(words) > 0.6:
+                continue
+
+        # Reject lines with very low character diversity.
+        # "ООО ООО О Ооо" has few unique chars relative to length.
+        alpha_chars = [c.lower() for c in line if c.isalpha()]
+        if len(alpha_chars) >= 4:
+            unique_ratio = len(set(alpha_chars)) / len(alpha_chars)
+            if unique_ratio < 0.15:
+                continue
+
         good_lines.append(line)
 
-    return "\n".join(good_lines)
+    result = "\n".join(good_lines)
+
+    # Final: reject very short results with tiny average word length.
+    if result:
+        all_words = result.split()
+        if len(all_words) <= 3:
+            avg_word_len = sum(len(w) for w in all_words) / len(all_words)
+            if avg_word_len < 3:
+                return ""
+
+    return result
 
 
 def _upscale(img: Image.Image) -> Image.Image:
@@ -138,11 +163,14 @@ class OcrWorker(QThread):
                     # Text isolation: detect text contours, crop, clean bg
                     isolated = isolate_text(raw_rgb)
 
-                    if isolated is not None:
-                        ocr_img = _upscale(Image.fromarray(isolated))
-                    else:
-                        # Fallback: send raw image (upscaled) if isolation fails
-                        ocr_img = _upscale(Image.fromarray(raw_rgb))
+                    if isolated is None:
+                        # No text detected — show raw frame in preview, skip OCR
+                        p_h, p_w = raw_rgb.shape[:2]
+                        self.frame_captured.emit(raw_rgb.tobytes(), p_w, p_h)
+                        self.msleep(self._interval_ms)
+                        continue
+
+                    ocr_img = _upscale(Image.fromarray(isolated))
 
                     # Send the processed image to preview so user can debug
                     preview_rgb = np.array(ocr_img)
@@ -150,7 +178,7 @@ class OcrWorker(QThread):
                     self.frame_captured.emit(preview_rgb.tobytes(), p_w, p_h)
 
                     # Debug saves
-                    if DEBUG_SAVE and self._capture_count < 5:
+                    if DEBUG_SAVE and self._capture_count < 20:
                         Image.fromarray(raw_rgb).save(
                             f"/tmp/crr_raw_{self._capture_count}.png"
                         )
@@ -171,12 +199,19 @@ class OcrWorker(QThread):
                         config="--psm 6 --oem 1",
                     ).strip()
 
+                    print(f"[OCR] Tesseract raw: {repr(text[:200] if text else '')}")
+
                     # Filter out garbage and deduplicate
                     if text:
-                        text = _filter_ocr_garbage(text)
+                        filtered = _filter_ocr_garbage(text)
+                        if filtered != text:
+                            print(f"[OCR] After filter: {repr(filtered[:200] if filtered else '<empty>')}")
+                        text = filtered
                         if text and text != self._last_emitted_text:
                             self._last_emitted_text = text
                             self.text_recognized.emit(text)
+                        elif text and text == self._last_emitted_text:
+                            print(f"[OCR] Dedup: same as last")
                 except Exception as e:
                     self.error_occurred.emit(str(e))
 

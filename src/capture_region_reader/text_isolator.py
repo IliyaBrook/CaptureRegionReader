@@ -21,6 +21,25 @@ import numpy as np
 CharBox = tuple[tuple[int, int, int, int], float]
 
 
+def _is_blank_frame(gray: np.ndarray) -> bool:
+    """Detect frames with no meaningful text content.
+
+    Checks dynamic range and pixel variance to reject uniform/empty
+    frames before Otsu amplifies noise into fake characters.
+
+    Must be conservative: game subtitles can be dim/colored (not white),
+    so only reject truly uniform images with almost zero contrast.
+    """
+    # Standard deviation of all pixel values.
+    # A truly black/uniform screen has stdev < 3-5 (only JPEG noise).
+    # Any screen with text (even dim) has stdev > 8-10.
+    std = float(np.std(gray))
+    if std < 5:
+        return True
+
+    return False
+
+
 def _find_char_boxes(
     gray: np.ndarray,
 ) -> tuple[list[CharBox], bool]:
@@ -108,6 +127,26 @@ def _find_char_boxes(
 
     if len(filtered) < 3:
         filtered = all_boxes
+
+    # --- Noise plausibility check ---
+    # On noisy frames, Otsu produces many tiny scattered contours.
+    # Real text has consistent heights and reasonable character size.
+    if len(filtered) >= 3:
+        areas = [cb[0][2] * cb[0][3] for cb in filtered]
+        heights = [cb[0][3] for cb in filtered]
+        median_area = float(np.median(areas))
+        median_height = float(np.median(heights))
+
+        # Real characters have median area >= 50px; noise blobs are ~4-16px.
+        if median_area < 50:
+            return [], text_is_bright
+
+        # Real text has consistent heights (same font size).
+        # Noise contours have wildly varying heights.
+        if len(heights) >= 5:
+            h_cv = float(np.std(heights)) / (median_height + 1)
+            if h_cv > 0.8:
+                return [], text_is_bright
 
     return filtered, text_is_bright
 
@@ -197,11 +236,19 @@ def _select_subtitle_lines(
     img_w: int,
     img_h: int,
 ) -> list[list[CharBox]]:
-    """Score and select the best subtitle lines."""
+    """Score and select the best subtitle lines.
+
+    Uses a two-pass approach:
+    1. Score each line individually, pick the best one.
+    2. Include nearby lines that look like part of the same subtitle
+       block (similar char height, close vertical distance).
+    """
     if not lines:
         return []
 
-    scored: list[tuple[float, list[CharBox]]] = []
+    # Build scored list with metadata for proximity checks
+    scored: list[tuple[float, list[CharBox], float, float]] = []
+    # Each entry: (score, core_boxes, y_center, avg_char_height)
 
     for line in lines:
         core = _find_dense_core(line)
@@ -215,12 +262,13 @@ def _select_subtitle_lines(
         line_w = x_max - x_min
 
         heights = [b[3] for b in boxes]
-        h_var = np.std(heights) / (np.mean(heights) + 1)
+        avg_h = float(np.mean(heights))
+        h_var = float(np.std(heights)) / (avg_h + 1)
 
         char_w_total = sum(b[2] for b in boxes)
         density = char_w_total / (line_w + 1)
 
-        y_center = np.mean([b[1] + b[3] / 2 for b in boxes])
+        y_center = float(np.mean([b[1] + b[3] / 2 for b in boxes]))
         y_pos = y_center / img_h
 
         score = 0.0
@@ -233,20 +281,39 @@ def _select_subtitle_lines(
         if line_w < img_w * 0.08:
             score -= 15
 
-        scored.append((score, core))
+        scored.append((score, core, y_center, avg_h))
 
     if not scored:
         return []
 
     scored.sort(key=lambda x: x[0], reverse=True)
-    best = scored[0][0]
+    best_score, best_line, best_y, best_h = scored[0]
 
-    result: list[list[CharBox]] = []
-    for score, line in scored:
-        if score >= best * 0.35 and score > 5:
-            result.append(line)
+    # Pass 1: always include the best line
+    result: list[list[CharBox]] = [best_line]
+
+    # Pass 2: include nearby lines that are part of the same subtitle block.
+    # A companion line must:
+    #   - have similar character height (within 40% of best)
+    #   - be vertically close (within 2.5x the char height of best line)
+    #   - have a minimum score (not total garbage)
+    for score, line, y_center, avg_h in scored[1:]:
         if len(result) >= 4:
             break
+
+        # Check character height similarity
+        h_ratio = avg_h / (best_h + 1)
+        if h_ratio < 0.6 or h_ratio > 1.6:
+            continue
+
+        # Check vertical proximity: must be within ~2.5 line heights
+        y_dist = abs(y_center - best_y)
+        if y_dist > best_h * 2.5:
+            continue
+
+        # Minimum quality: must have at least some substance
+        if score > 5:
+            result.append(line)
 
     result.sort(key=lambda line: np.mean([c[0][1] for c in line]))
     return result
@@ -266,6 +333,10 @@ def isolate_text(rgb: np.ndarray) -> np.ndarray | None:
         return None
 
     gray = cv2.cvtColor(rgb, cv2.COLOR_RGB2GRAY)
+
+    # Early rejection: blank/uniform frames produce noise under Otsu
+    if _is_blank_frame(gray):
+        return None
 
     # Step 1: find char boxes (brightness-filtered)
     boxes, text_is_bright = _find_char_boxes(gray)
@@ -291,7 +362,10 @@ def isolate_text(rgb: np.ndarray) -> np.ndarray | None:
     cy2 = max(b[1] + b[3] for b in all_rects)
 
     pad_x = max(6, int((cx2 - cx1) * 0.03))
-    pad_y = max(4, int((cy2 - cy1) * 0.15))
+    # Generous vertical padding: use character height as baseline, not block height.
+    # This prevents clipping descenders/ascenders and catches nearby text.
+    avg_char_h = float(np.mean([b[3] for b in all_rects]))
+    pad_y = max(6, int(avg_char_h * 0.5))
     cx1 = max(0, cx1 - pad_x)
     cx2 = min(w, cx2 + pad_x)
     cy1 = max(0, cy1 - pad_y)
