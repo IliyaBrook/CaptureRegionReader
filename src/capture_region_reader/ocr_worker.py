@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import time
 import numpy as np
 import pytesseract
 from difflib import SequenceMatcher
@@ -290,13 +291,15 @@ class OcrWorker(QThread):
 
                     # PSM 6 = uniform text block (isolated text is a clean block)
                     # OEM 1 = legacy engine (consistent)
+                    t0 = time.monotonic()
                     text = pytesseract.image_to_string(
                         ocr_img,
                         lang=self._language,
                         config="--psm 6 --oem 1",
                     ).strip()
+                    ocr_ms = int((time.monotonic() - t0) * 1000)
 
-                    print(f"[OCR] Tesseract raw: {repr(text[:200] if text else '')}")
+                    print(f"[OCR] ({ocr_ms}ms) Tesseract raw: {repr(text[:200] if text else '')}")
 
                     # Filter out garbage and deduplicate
                     if text:
@@ -315,7 +318,7 @@ class OcrWorker(QThread):
                                 self._stable_emits += 1
                                 print(f"[OCR] Emit for stability ({self._stable_emits}/3)")
                                 self.text_recognized.emit(text)
-                                if self._stable_emits >= 3:
+                                if self._stable_emits >= 2:
                                     # Enough stable emits, TextDiffer
                                     # should have flushed by now
                                     self._growth_detected = False

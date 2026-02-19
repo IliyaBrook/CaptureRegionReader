@@ -4,6 +4,7 @@ import asyncio
 import os
 import subprocess
 import tempfile
+import time
 from queue import Empty, Queue
 
 from PyQt6.QtCore import QThread, pyqtSignal
@@ -102,13 +103,17 @@ class TtsWorker(QThread):
                 voice = VOICE_RU if lang == "ru" else VOICE_EN
 
                 self.speech_started.emit()
+                print(f"[TTS] Generating: {repr(text[:60])}")
 
                 # Generate audio with edge-tts
                 tmp_file = tempfile.mktemp(suffix=".mp3")
                 try:
+                    t0 = time.monotonic()
                     loop.run_until_complete(
                         self._generate_audio(text, voice, tmp_file)
                     )
+                    gen_ms = int((time.monotonic() - t0) * 1000)
+                    print(f"[TTS] Generated in {gen_ms}ms, playing...")
 
                     if self._cancel_requested:
                         continue

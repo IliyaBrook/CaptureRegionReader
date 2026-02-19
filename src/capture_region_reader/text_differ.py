@@ -39,8 +39,8 @@ class TextDiffer:
 
     # How many consecutive OCR cycles the text must remain stable
     # before we emit buffered growing text.  At 500ms interval this
-    # means ~1 second of stability.
-    STABLE_CYCLES = 2
+    # means ~500ms of stability — enough to confirm text stopped typing.
+    STABLE_CYCLES = 1
 
     def __init__(self, similarity_threshold: float = 0.85):
         self._last_spoken: str = ""       # last text that was actually emitted (spoken)
