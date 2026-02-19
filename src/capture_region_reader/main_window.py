@@ -11,6 +11,7 @@ from PyQt6.QtWidgets import (
     QLabel,
     QLineEdit,
     QMainWindow,
+    QMessageBox,
     QPushButton,
     QScrollArea,
     QSlider,
@@ -481,3 +482,71 @@ class MainWindow(QMainWindow):
 
     def show_error(self, message: str) -> None:
         self._status_bar.showMessage(f"Error: {message}")
+
+    def revert_ocr_engine(self, failed_engine: str, error_msg: str) -> None:
+        """Revert OCR engine combo box and show error dialog.
+
+        Called when the requested OCR engine is not installed.
+        Reverts the combo box to the currently working engine and
+        shows a message box explaining what happened.
+        """
+        # Revert combo to the actual working engine (stored in settings)
+        actual_engine = self.settings.ocr_engine
+        # If the settings already saved the bad engine, revert to tesseract
+        if actual_engine == failed_engine:
+            actual_engine = "tesseract"
+            self.settings.ocr_engine = actual_engine
+
+        # Block signals to avoid re-triggering the change handler
+        self._combo_engine.blockSignals(True)
+        for i in range(self._combo_engine.count()):
+            if self._combo_engine.itemData(i) == actual_engine:
+                self._combo_engine.setCurrentIndex(i)
+                break
+        self._combo_engine.blockSignals(False)
+
+        # Show error dialog
+        engine_names = {"easyocr": "EasyOCR", "tesseract": "Tesseract"}
+        display_name = engine_names.get(failed_engine, failed_engine)
+
+        QMessageBox.warning(
+            self,
+            "Движок OCR недоступен",
+            f"Не удалось загрузить движок <b>{display_name}</b>.\n\n"
+            f"Ошибка: {error_msg}\n\n"
+            f"Установите необходимые пакеты или выберите другой движок.\n\n"
+            f"Для EasyOCR:\n"
+            f"  uv pip install easyocr torch",
+        )
+
+    def revert_tts_engine(self, failed_engine: str, error_msg: str) -> None:
+        """Revert TTS engine combo box and show error dialog.
+
+        Called when the requested TTS engine is not installed.
+        """
+        actual_engine = self.settings.tts_engine
+        if actual_engine == failed_engine:
+            actual_engine = "edge-tts"
+            self.settings.tts_engine = actual_engine
+
+        self._combo_tts.blockSignals(True)
+        for i in range(self._combo_tts.count()):
+            if self._combo_tts.itemData(i) == actual_engine:
+                self._combo_tts.setCurrentIndex(i)
+                break
+        self._combo_tts.blockSignals(False)
+
+        engine_names = {"silero": "Silero TTS", "edge-tts": "Edge-TTS"}
+        display_name = engine_names.get(failed_engine, failed_engine)
+
+        QMessageBox.warning(
+            self,
+            "Голосовой движок недоступен",
+            f"Не удалось загрузить движок <b>{display_name}</b>.\n\n"
+            f"Ошибка: {error_msg}\n\n"
+            f"Установите необходимые пакеты или выберите другой движок.\n\n"
+            f"Для Silero TTS (локальный, GPU):\n"
+            f"  uv pip install torch\n\n"
+            f"Для Edge-TTS (облачный):\n"
+            f"  uv pip install edge-tts",
+        )

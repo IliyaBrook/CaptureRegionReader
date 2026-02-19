@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import os
 import re
 import subprocess
@@ -12,6 +13,8 @@ from typing import Protocol
 
 import numpy as np
 from PyQt6.QtCore import QThread, pyqtSignal
+
+logger = logging.getLogger(__name__)
 
 
 # edge-tts voice IDs
@@ -204,15 +207,18 @@ def create_tts_engine(name: str) -> TtsEngine:
 
     Returns:
         A TTS engine instance.
+
+    Raises:
+        ImportError: if the requested engine's dependencies are missing.
+        The caller is responsible for handling the error and informing the user.
     """
     if name == "silero":
-        try:
-            import torch  # noqa: F401
-            return SileroTtsEngine()
-        except ImportError:
-            print("[TTS] torch not installed, falling back to edge-tts")
-            return EdgeTtsEngine()
-    return EdgeTtsEngine()
+        import torch  # noqa: F401
+        return SileroTtsEngine()
+    if name == "edge-tts":
+        import edge_tts  # noqa: F401
+        return EdgeTtsEngine()
+    raise ValueError(f"Unknown TTS engine: {name}")
 
 
 # ── TTS Worker Thread ──────────────────────────────────────────────
@@ -221,6 +227,7 @@ class TtsWorker(QThread):
     speech_started = pyqtSignal()
     speech_finished = pyqtSignal()
     error_occurred = pyqtSignal(str)
+    engine_unavailable = pyqtSignal(str, str)  # (engine_name, error_message)
 
     def __init__(self) -> None:
         super().__init__()
@@ -237,22 +244,37 @@ class TtsWorker(QThread):
         self._engine_name: str = ""  # empty so first set_engine() always triggers
 
     def set_engine(self, name: str) -> None:
-        """Switch TTS engine at runtime."""
-        print(f"[TTS] set_engine called: '{name}' (current: '{self._engine_name}', "
-              f"engine type: {type(self._engine).__name__})")
+        """Switch TTS engine at runtime.
+
+        If the requested engine is not installed, emits engine_unavailable
+        signal so the UI can revert the combo box and inform the user.
+        Does NOT silently fall back to another engine.
+        """
         if name == self._engine_name:
-            print(f"[TTS] set_engine: same name, skipping")
             return
-        old_name = self._engine_name
-        self._engine_name = name
-        # Close old engine
-        if self._engine is not None and hasattr(self._engine, "close"):
-            self._engine.close()
-        self._engine = create_tts_engine(name)
-        # Re-apply rate/volume to the new engine
-        self._apply_rate_volume()
-        print(f"[TTS] Switched engine: {old_name} -> {name} "
-              f"(now: {type(self._engine).__name__})")
+        try:
+            old_name = self._engine_name
+            new_engine = create_tts_engine(name)
+            # Close old engine only after new one is successfully created
+            if self._engine is not None and hasattr(self._engine, "close"):
+                self._engine.close()
+            self._engine = new_engine
+            self._engine_name = name
+            # Re-apply rate/volume to the new engine
+            self._apply_rate_volume()
+            logger.info("TTS engine switched: %s -> %s", old_name, name)
+        except (ImportError, ValueError) as e:
+            logger.error("Failed to switch TTS to %s: %s", name, e)
+            # Emit detailed error so the UI can show a dialog
+            self.engine_unavailable.emit(name, str(e))
+            # Do NOT silently fall back. If no engine loaded at all, load default.
+            if self._engine is None:
+                try:
+                    self._engine = EdgeTtsEngine()
+                    self._engine_name = "edge-tts"
+                    logger.info("No TTS engine loaded, defaulting to edge-tts")
+                except Exception:
+                    logger.error("Could not load any TTS engine")
 
     def set_rate(self, rate: int) -> None:
         self._rate_wpm = rate

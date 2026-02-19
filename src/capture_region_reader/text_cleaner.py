@@ -193,9 +193,9 @@ def clean_for_tts(text: str) -> str:
     # Remove sequences of random non-alphanumeric characters
     text = _RE_SYMBOL_SEQUENCE.sub(" ", text)
 
-    # Clean up remaining quotes
+    # Clean up remaining quotes -- but preserve apostrophes inside English
     text = text.replace('"', "")
-    text = text.replace("'", "")
+    text = re.sub(r"(?<![a-zA-Z])'|'(?![a-zA-Z])", "", text)
 
     # Remove hard sign -- often OCR noise in subtitle context
     text = text.replace("\u044a", "")
@@ -287,8 +287,8 @@ def filter_by_language(text: str, language: str) -> str:
     If language is "rus" -- remove lines with mostly Latin characters
     and lines that look like misrecognized English (fake Cyrillic).
     If language is "eng" -- remove lines with mostly Cyrillic characters.
-    If language is "eng+rus" -- only remove lines with mixed-script words
-    (which are always OCR errors).
+    If language is "eng+rus" -- accept both scripts freely; only reject lines
+    that are pure OCR noise (no recognizable words in either language).
 
     This helps filter OCR noise where random UI text or other language
     text gets picked up alongside subtitles.
@@ -314,14 +314,24 @@ def filter_by_language(text: str, language: str) -> str:
         cyr_ratio = cyrillic / total_alpha
 
         if language == "eng+rus":
-            # In bilingual mode, only reject lines with mixed-script words.
-            # These are always OCR errors (real text doesn't mix scripts
-            # within a single word).
+            # Bilingual mode: accept lines with EITHER script.
+            # Both Cyrillic and Latin words are expected — this is the whole
+            # point of eng+rus mode (e.g. Russian text with English brand names).
+            #
+            # Only reject lines that are clearly noise:
+            # - Lines where majority of words have mixed scripts WITHIN the
+            #   same word AND are too short to be real words (len < 3).
+            #   Mixed-script words of length >= 4 might be post-repair results
+            #   from the dual-pass OCR merge and should be kept.
             words = stripped.split()
             if len(words) > 0:
-                mixed_count = sum(1 for w in words if _has_mixed_scripts(w))
-                mixed_ratio = mixed_count / len(words)
-                if mixed_ratio > 0.3:
+                noise_count = 0
+                for w in words:
+                    w_clean = w.strip(".,!?;:-\"'()[]{}«»")
+                    if len(w_clean) < 3 and _has_mixed_scripts(w_clean):
+                        noise_count += 1
+                # Only reject if almost ALL words are noise fragments
+                if noise_count > 0 and noise_count / len(words) > 0.6:
                     continue
             filtered.append(line)
 

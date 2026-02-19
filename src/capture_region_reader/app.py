@@ -77,6 +77,10 @@ class App:
         w.tts_engine_changed.connect(self._tts_worker.set_engine)
         w.settle_time_changed.connect(self._text_differ.set_settle_time)
 
+        # Engine unavailable errors — show dialog and revert combo box
+        self._ocr_worker.engine_unavailable.connect(w.revert_ocr_engine)
+        self._tts_worker.engine_unavailable.connect(w.revert_tts_engine)
+
     def _apply_settings(self) -> None:
         s = self._settings
         self._tts_worker.set_engine(s.tts_engine)

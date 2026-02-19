@@ -1,6 +1,9 @@
 """Isolate subtitle text from a screenshot before OCR.
 
 Pipeline:
+0. Dark box detection: if subtitles sit inside a dark rectangular bar
+   (common in broadcasts/news), crop to that bar first to eliminate
+   noisy multi-colored backgrounds before Otsu thresholding.
 1. Find character-like contours (brightness-filtered) on raw grayscale
 2. Cluster into horizontal text lines
 3. Score lines and pick the best subtitle block
@@ -150,6 +153,37 @@ class IsolatorConfig:
     # Mean brightness below which enhanced processing activates (too dark).
     enhance_dark_threshold: float = 55.0
 
+    # -- Dark subtitle box detection --
+    # Some broadcasts place subtitles inside a dark/black rectangular bar.
+    # When such a box is detected, the pipeline crops to it first, removing
+    # the noisy multi-colored background that confuses Otsu thresholding.
+
+    # Grayscale threshold to classify pixels as "dark" (0-255).
+    # Pixels below this value are considered part of a potential dark box.
+    dark_box_threshold: int = 50
+    # Minimum area of the dark box as a fraction of total image area.
+    # Subtitle bars are thin wide strips -- typically 5-15% of image area.
+    # Set low enough to catch thin bars, but combined with aspect ratio
+    # and width checks, this still rejects small noise patches.
+    dark_box_min_area_ratio: float = 0.05
+    # Minimum aspect ratio (width / height) of the dark box.
+    # Subtitle bars are wider than tall. 2.0 means at least 2x wider.
+    dark_box_min_aspect_ratio: float = 2.0
+    # Minimum width of the dark box as a fraction of image width.
+    # Ensures the box spans a meaningful portion of the screen.
+    dark_box_min_width_ratio: float = 0.30
+    # Maximum standard deviation of pixel values inside the dark box.
+    # A true dark subtitle bar has uniformly dark pixels (low std).
+    # Higher values are more permissive (allow gradient backgrounds).
+    dark_box_max_internal_std: float = 35.0
+    # Padding around the detected dark box as a fraction of box dimensions.
+    # Default 0 because adding padding pulls in non-dark pixels from the
+    # surrounding background, which confuses Otsu thresholding inside the
+    # cropped region. The character detection pipeline already applies its
+    # own crop padding in a later step. Only increase this if text is
+    # being clipped at the very edges of the dark bar.
+    dark_box_padding_ratio: float = 0.0
+
     # -- Morphological cleanup --
     # Kernel size for opening operation to remove small noise in final binary.
     morph_open_kernel_size: int = 2
@@ -241,6 +275,131 @@ def _is_blank_frame(gray: np.ndarray, cfg: IsolatorConfig) -> bool:
     """
     std = float(np.std(gray))
     return std < cfg.blank_frame_std_threshold
+
+
+# ---------------------------------------------------------------------------
+# Dark subtitle box detection
+# ---------------------------------------------------------------------------
+
+def _find_dark_subtitle_box(
+    gray: np.ndarray,
+    cfg: IsolatorConfig,
+) -> tuple[int, int, int, int] | None:
+    """Detect a dark rectangular subtitle bar in the image.
+
+    Broadcasts and news programs often place subtitles inside a dark/black
+    rectangular box overlaid on a complex background. When such a box is
+    present, the standard Otsu thresholding on the full image picks up
+    noise from logos, colored bars, and photos, drowning out the actual
+    subtitle text.
+
+    This function looks for a large, wide, uniformly dark rectangle. If
+    found, isolate_text() can crop to it and run the character detection
+    pipeline on a much cleaner input.
+
+    Returns (x, y, w, h) of the dark box bounding rectangle, or None if
+    no suitable dark box is found.
+    """
+    img_h, img_w = gray.shape
+    img_area = img_h * img_w
+
+    # Step 1: threshold to find very dark regions.
+    # Everything below dark_box_threshold becomes white (foreground),
+    # everything above becomes black (background).
+    _, dark_mask = cv2.threshold(
+        gray, cfg.dark_box_threshold, 255, cv2.THRESH_BINARY_INV
+    )
+
+    # Step 2: morphological closing to merge nearby dark patches into
+    # a single solid region. Without this, thin bright text inside the
+    # dark box creates holes that split the contour.
+    close_k = max(5, img_w // 80)
+    close_kernel = cv2.getStructuringElement(
+        cv2.MORPH_RECT, (close_k, close_k)
+    )
+    dark_mask = cv2.morphologyEx(dark_mask, cv2.MORPH_CLOSE, close_kernel)
+
+    # Step 3: find contours of dark regions
+    contours, _ = cv2.findContours(
+        dark_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
+    )
+
+    if not contours:
+        return None
+
+    # Step 4: evaluate each contour against the criteria.
+    # We want the largest qualifying contour (by area).
+    min_area = img_area * cfg.dark_box_min_area_ratio
+    min_width = img_w * cfg.dark_box_min_width_ratio
+
+    best_candidate: tuple[int, int, int, int] | None = None
+    best_area = 0
+
+    for cnt in contours:
+        x, y, w, h = cv2.boundingRect(cnt)
+        box_area = w * h
+
+        # Size check: must be a significant portion of the image
+        if box_area < min_area:
+            continue
+
+        # Shape check: must be wider than tall (subtitle bar shape)
+        if h == 0:
+            continue
+        aspect = w / h
+        if aspect < cfg.dark_box_min_aspect_ratio:
+            continue
+
+        # Width check: must span a meaningful portion of the screen
+        if w < min_width:
+            continue
+
+        # Uniformity check: the dark BACKGROUND pixels inside the bounding
+        # box should have consistently low brightness (low std). We mask
+        # out bright pixels (text) before computing std, because bright
+        # subtitle text inside the box would inflate std and cause a
+        # false rejection.
+        roi = gray[y : y + h, x : x + w]
+        dark_pixels = roi[roi <= cfg.dark_box_threshold]
+        # If less than 40% of the box is dark, it's not a true dark bar
+        if len(dark_pixels) < 0.4 * roi.size:
+            continue
+        internal_std = float(np.std(dark_pixels))
+        if internal_std > cfg.dark_box_max_internal_std:
+            continue
+
+        # This contour passes all criteria. Keep if it's the largest.
+        if box_area > best_area:
+            best_area = box_area
+            best_candidate = (x, y, w, h)
+
+    return best_candidate
+
+
+def _crop_to_dark_box(
+    gray: np.ndarray,
+    box: tuple[int, int, int, int],
+    cfg: IsolatorConfig,
+) -> tuple[np.ndarray, int, int]:
+    """Crop grayscale image to the dark box region with padding.
+
+    Returns (cropped_gray, offset_x, offset_y) where offsets are the
+    top-left corner of the crop in the original image coordinate space.
+    These offsets are needed if the caller needs to map coordinates back
+    to the original image.
+    """
+    img_h, img_w = gray.shape
+    bx, by, bw, bh = box
+
+    pad_x = int(bw * cfg.dark_box_padding_ratio)
+    pad_y = int(bh * cfg.dark_box_padding_ratio)
+
+    x1 = max(0, bx - pad_x)
+    y1 = max(0, by - pad_y)
+    x2 = min(img_w, bx + bw + pad_x)
+    y2 = min(img_h, by + bh + pad_y)
+
+    return gray[y1:y2, x1:x2], x1, y1
 
 
 # ---------------------------------------------------------------------------
@@ -640,6 +799,22 @@ def isolate_text(
 
     if _is_blank_frame(gray, cfg):
         return None
+
+    # Step 0: dark subtitle box detection.
+    # Broadcasts and news programs place subtitles in a dark rectangular
+    # bar on a complex multi-colored background. Otsu on the full image
+    # picks up noise from logos, red bars, photos, etc. If we detect such
+    # a box, we crop to it first so the character detection pipeline runs
+    # on a clean, uniformly dark background.
+    dark_box = _find_dark_subtitle_box(gray, cfg)
+    if dark_box is not None:
+        gray, _, _ = _crop_to_dark_box(gray, dark_box, cfg)
+        # Update dimensions to match the cropped region.
+        # All subsequent steps operate on this smaller image.
+        h, w = gray.shape
+
+        if h < 10 or w < 10:
+            return None
 
     # Step 1: find character boxes (brightness-filtered)
     boxes, text_is_bright = _find_char_boxes(gray, cfg)
