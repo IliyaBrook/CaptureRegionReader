@@ -175,7 +175,9 @@ class App:
         # Apply language filter first (removes lines with wrong language)
         text = filter_by_language(text, self._settings.language)
 
-        self._window.update_text_display(text)
+        # Update display only when there's actual text (avoid flickering)
+        if text:
+            self._window.update_text_display(text)
 
         new_text = self._text_differ.get_new_text(text)
         if new_text:

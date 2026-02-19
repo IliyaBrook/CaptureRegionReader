@@ -38,42 +38,68 @@ def _extract_real_words(text: str) -> list[str]:
     return words
 
 
-def _texts_similar(a: str, b: str, threshold: float = 0.75) -> bool:
-    """Check if two OCR texts are similar enough to be the same subtitle.
+def _strip_ocr_artifacts(text: str) -> str:
+    """Remove common OCR cursor/boundary artifacts for comparison."""
+    import re
+    # Remove trailing artifacts: |, ], [, ), \, trailing punctuation junk
+    text = re.sub(r"[\|\]\[\)\\\}]+\s*$", "", text)
+    # Also remove mid-text stray | ] [ chars
+    text = re.sub(r"[\|\]\[]", "", text)
+    return text.strip()
 
-    Uses three strategies, from fast to thorough:
-    1. Normalized full-text exact/containment match
-    2. SequenceMatcher on normalized text (catches OCR jitter)
-    3. Real-word overlap — compares only plausible dictionary words,
-       ignoring garbage tokens from background noise.  This is the key
-       defence against repeated reads when the background behind
-       subtitles changes and adds/removes noise around the same text.
+
+def _texts_similar(
+    new_text: str, last_emitted: str, threshold: float = 0.75
+) -> bool:
+    """Check if *new_text* is similar enough to *last_emitted* to skip.
+
+    Returns True  → "same subtitle, don't emit again"
+    Returns False → "different or grew, let it through"
+
+    Important asymmetry for typewriter-style subtitles:
+      - last_emitted is a prefix of new_text → text GREW → False
+      - new_text is a subset of last_emitted → partial OCR → True (skip)
     """
-    if not a or not b:
+    if not new_text or not last_emitted:
         return False
-    norm_a = " ".join(a.split())
-    norm_b = " ".join(b.split())
-    if norm_a == norm_b:
-        return True
-    # Containment check (partial OCR of same subtitle)
-    if norm_a in norm_b or norm_b in norm_a:
-        return True
-    # Full-text similarity
-    if SequenceMatcher(None, norm_a, norm_b).ratio() >= threshold:
+    norm_new = " ".join(new_text.split())
+    norm_old = " ".join(last_emitted.split())
+    if norm_new == norm_old:
         return True
 
-    # Real-word overlap: if most real words are shared, it's the
-    # same subtitle with different background garbage.
-    words_a = _extract_real_words(a)
-    words_b = _extract_real_words(b)
-    if len(words_a) >= 2 and len(words_b) >= 2:
-        set_a = set(words_a)
-        set_b = set(words_b)
-        overlap = len(set_a & set_b)
-        # What fraction of the SMALLER set is covered?
-        smaller = min(len(set_a), len(set_b))
+    # Strip OCR artifacts (|, ], etc.) for containment checks —
+    # typewriter subtitles have a blinking cursor that OCR reads as |/]/etc.
+    clean_new = _strip_ocr_artifacts(norm_new)
+    clean_old = _strip_ocr_artifacts(norm_old)
+
+    # new is a subset of old → partial OCR of same subtitle → skip
+    if clean_new in clean_old:
+        return True
+
+    # old is a subset of new → text GREW (typewriter subtitles) → let through
+    if clean_old in clean_new:
+        return False
+
+    # Word-level growth detection: handles OCR jitter within words
+    # (e.g., "ВВЕАКЕН" vs "ВНЕАКЕН") while still detecting growth.
+    words_new = _extract_real_words(new_text)
+    words_old = _extract_real_words(last_emitted)
+    if len(words_new) >= 2 and len(words_old) >= 2:
+        set_new = set(words_new)
+        set_old = set(words_old)
+        overlap = len(set_new & set_old)
+        smaller = min(len(set_new), len(set_old))
+
         if overlap / smaller >= 0.6:
+            # Most old words are in new — check if new has MORE words
+            if len(set_new) > len(set_old):
+                # Text grew — let through for TextDiffer to handle
+                return False
             return True
+
+    # Full-text similarity (catch OCR jitter with same word count)
+    if SequenceMatcher(None, norm_old, norm_new).ratio() >= threshold:
+        return True
 
     return False
 
@@ -176,6 +202,8 @@ class OcrWorker(QThread):
         self._running: bool = False
         self._capture_count: int = 0
         self._last_emitted_text: str = ""
+        self._growth_detected: bool = False  # True when growth was recently seen
+        self._stable_emits: int = 0          # count of stable emits after growth
 
     def configure(
         self,
@@ -188,6 +216,8 @@ class OcrWorker(QThread):
         self._interval_ms = interval_ms
         self._capture_count = 0
         self._last_emitted_text = ""
+        self._growth_detected = False
+        self._stable_emits = 0
         print(f"[OCR] Configured region: left={region[0]}, top={region[1]}, "
               f"width={region[2]}, height={region[3]}, lang={language}")
 
@@ -227,6 +257,12 @@ class OcrWorker(QThread):
                         # No text detected — show raw frame in preview, skip OCR
                         p_h, p_w = raw_rgb.shape[:2]
                         self.frame_captured.emit(raw_rgb.tobytes(), p_w, p_h)
+                        # If growth was recently detected, notify TextDiffer
+                        # that text disappeared so it can flush pending buffer
+                        if self._growth_detected:
+                            self.text_recognized.emit("")
+                            self._growth_detected = False
+                            self._stable_emits = 0
                         self.msleep(self._interval_ms)
                         continue
 
@@ -269,9 +305,57 @@ class OcrWorker(QThread):
                             print(f"[OCR] After filter: {repr(filtered[:200] if filtered else '<empty>')}")
                         text = filtered
                         if text:
-                            if _texts_similar(text, self._last_emitted_text):
+                            similar = _texts_similar(text, self._last_emitted_text)
+                            if similar and not self._growth_detected:
+                                # Same subtitle, no pending growth — skip
                                 print(f"[OCR] Dedup: similar to last")
+                            elif similar and self._growth_detected:
+                                # Text stabilized after growth — emit for
+                                # TextDiffer stability counting, then stop
+                                self._stable_emits += 1
+                                print(f"[OCR] Emit for stability ({self._stable_emits}/3)")
+                                self.text_recognized.emit(text)
+                                if self._stable_emits >= 3:
+                                    # Enough stable emits, TextDiffer
+                                    # should have flushed by now
+                                    self._growth_detected = False
+                                    self._stable_emits = 0
                             else:
+                                # Different text — detect growth
+                                clean_new = _strip_ocr_artifacts(text)
+                                clean_old = _strip_ocr_artifacts(
+                                    self._last_emitted_text
+                                )
+                                is_growth = (
+                                    clean_old
+                                    and clean_old in clean_new
+                                    and len(clean_new) > len(clean_old) + 3
+                                )
+                                if not is_growth:
+                                    # Also check word-level growth
+                                    words_old = _extract_real_words(
+                                        self._last_emitted_text
+                                    )
+                                    words_new = _extract_real_words(text)
+                                    if (
+                                        len(words_old) >= 1
+                                        and len(words_new) > len(words_old)
+                                    ):
+                                        set_old = set(words_old)
+                                        set_new = set(words_new)
+                                        overlap = len(set_old & set_new)
+                                        if (
+                                            len(set_old) > 0
+                                            and overlap / len(set_old) >= 0.6
+                                        ):
+                                            is_growth = True
+                                if is_growth:
+                                    self._growth_detected = True
+                                    self._stable_emits = 0
+                                else:
+                                    # Completely new subtitle
+                                    self._growth_detected = False
+                                    self._stable_emits = 0
                                 self._last_emitted_text = text
                                 self.text_recognized.emit(text)
                 except Exception as e:
