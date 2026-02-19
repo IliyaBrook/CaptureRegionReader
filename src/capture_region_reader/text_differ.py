@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 import re
-from difflib import SequenceMatcher
+import time
+from collections import Counter
 
 
 def _clean(text: str) -> str:
@@ -12,7 +13,7 @@ def _clean(text: str) -> str:
 
 
 def _extract_words(text: str) -> list[str]:
-    """Extract alphabetic words (≥3 chars) for word-level comparison."""
+    """Extract alphabetic words (>=3 chars) for word-level comparison."""
     words = []
     for w in text.split():
         # Strip punctuation from edges
@@ -22,33 +23,148 @@ def _extract_words(text: str) -> list[str]:
     return words
 
 
+# --- Triple similarity metrics (ported from RST Logic.cs) ---
+
+# Stop words for keyword similarity — common words that don't carry meaning
+_STOP_WORDS_EN = frozenset({
+    "a", "an", "the", "is", "are", "was", "were", "be", "been", "being",
+    "have", "has", "had", "do", "does", "did", "will", "would", "shall",
+    "should", "may", "might", "can", "could", "must", "to", "of", "in",
+    "for", "on", "with", "at", "by", "from", "as", "into", "through",
+    "during", "before", "after", "above", "below", "between", "out",
+    "off", "over", "under", "again", "further", "then", "once", "and",
+    "but", "or", "nor", "not", "no", "so", "if", "than", "too", "very",
+    "just", "about", "up", "down", "here", "there", "when", "where",
+    "how", "all", "both", "each", "few", "more", "most", "other", "some",
+    "such", "only", "own", "same", "that", "this", "what", "which", "who",
+    "it", "its", "he", "she", "we", "they", "me", "him", "her", "us",
+    "them", "my", "your", "his", "our", "their", "i", "you",
+})
+
+_STOP_WORDS_RU = frozenset({
+    "и", "в", "на", "не", "что", "он", "она", "оно", "они", "мы", "вы",
+    "я", "ты", "с", "а", "но", "да", "по", "к", "за", "из", "от", "до",
+    "у", "о", "как", "все", "это", "так", "его", "её", "их", "уже", "бы",
+    "ли", "же", "то", "ещё", "или", "мне", "тебе", "ему", "ей", "нам",
+    "вам", "им", "себе", "был", "была", "было", "были", "быть", "есть",
+    "будет", "тот", "тут", "там", "вот", "при", "для", "про", "без",
+})
+
+_STOP_WORDS = _STOP_WORDS_EN | _STOP_WORDS_RU
+
+
+def _dice_coefficient(s1: str, s2: str) -> float:
+    """Dice coefficient using character bigrams.
+
+    Creates 2-grams from both strings and computes:
+    dice = 2 * |intersection| / (|set1| + |set2|)
+    """
+    s1 = s1.lower()
+    s2 = s2.lower()
+
+    if len(s1) < 2 or len(s2) < 2:
+        # For very short strings: character overlap
+        if not s1 or not s2:
+            return 0.0
+        common = sum(1 for c in s1 if c in s2)
+        return common / max(len(s1), len(s2))
+
+    bigrams1 = Counter(s1[i:i + 2] for i in range(len(s1) - 1))
+    bigrams2 = Counter(s2[i:i + 2] for i in range(len(s2) - 1))
+
+    intersection = sum((bigrams1 & bigrams2).values())
+    total = sum(bigrams1.values()) + sum(bigrams2.values())
+
+    if total == 0:
+        return 0.0
+    return (2.0 * intersection) / total
+
+
+def _keyword_similarity(s1: str, s2: str) -> float:
+    """Keyword similarity: Dice on meaningful words (stop words removed)."""
+    splitter = re.compile(r"[ ,.\-!?;:\n\r\t]+")
+
+    kw1 = {w.lower() for w in splitter.split(s1) if w and w.lower() not in _STOP_WORDS}
+    kw2 = {w.lower() for w in splitter.split(s2) if w and w.lower() not in _STOP_WORDS}
+
+    if not kw1 or not kw2:
+        return _dice_coefficient(s1, s2)
+
+    common = len(kw1 & kw2)
+    return (2.0 * common) / (len(kw1) + len(kw2))
+
+
+def _word_overlap_jaccard(s1: str, s2: str) -> float:
+    """Word overlap using Jaccard index."""
+    words1 = {w.lower() for w in s1.split() if w}
+    words2 = {w.lower() for w in s2.split() if w}
+
+    if not words1 or not words2:
+        return 0.0
+
+    common = len(words1 & words2)
+    union = len(words1) + len(words2) - common
+
+    if union == 0:
+        return 0.0
+    return common / union
+
+
+def is_text_similar(s1: str, s2: str, threshold: float = 0.75) -> bool:
+    """Check if two texts are similar using triple metric (RST-style).
+
+    Computes three similarity metrics and uses the maximum:
+    1. Dice coefficient (bigram-based)
+    2. Keyword similarity (stop words removed)
+    3. Word overlap (Jaccard index)
+
+    Returns True if max(metrics) >= threshold.
+    """
+    if not s1 and not s2:
+        return True
+    if not s1 or not s2:
+        return False
+    if s1 == s2:
+        return True
+
+    # For very short strings (< 5 chars), use exact matching
+    if len(s1) < 5 or len(s2) < 5:
+        return s1.strip().lower() == s2.strip().lower()
+
+    dice = _dice_coefficient(s1, s2)
+    keyword = _keyword_similarity(s1, s2)
+    jaccard = _word_overlap_jaccard(s1, s2)
+
+    max_sim = max(dice, keyword, jaccard)
+    return max_sim >= threshold
+
+
 class TextDiffer:
     """Detects new/changed text to avoid repeating already-spoken content.
 
     The key challenge: OCR runs every ~500ms and may produce:
-    1. Identical text (same subtitle still on screen) → must NOT re-speak
-    2. Slightly different text (OCR jitter: extra space, punctuation change) → must NOT re-speak
-    3. Genuinely new text (subtitle changed) → MUST speak
-    4. Growing text (scrolling/streaming subtitles) → wait for stabilization, then speak
+    1. Identical text (same subtitle still on screen) -> must NOT re-speak
+    2. Slightly different text (OCR jitter: extra space, punctuation change) -> must NOT re-speak
+    3. Genuinely new text (subtitle changed) -> MUST speak
+    4. Growing text (scrolling/streaming subtitles) -> wait for stabilization, then speak
 
     Stabilization: when text is detected as actively growing (typewriter
-    subtitles), we buffer it and wait for it to stop changing before
-    emitting.  This prevents reading partial words like "МНОГОЧИСЛЕНН"
-    followed by "ЫЕ ПРОТИВНИКИ".
+    subtitles), we buffer it and wait for settle_time_ms to elapse since
+    the last change before emitting.  This prevents reading partial words.
     """
 
-    # How many consecutive OCR cycles the text must remain stable
-    # before we emit buffered growing text.  At 500ms interval this
-    # means ~500ms of stability — enough to confirm text stopped typing.
-    STABLE_CYCLES = 1
-
-    def __init__(self, similarity_threshold: float = 0.85):
+    def __init__(self, similarity_threshold: float = 0.75, settle_time_ms: int = 300):
         self._last_spoken: str = ""       # last text that was actually emitted (spoken)
         self._threshold = similarity_threshold
 
-        # Stabilization state for growing text
-        self._pending_text: str | None = None   # buffered text waiting to stabilize
-        self._stable_count: int = 0              # how many cycles it's been unchanged
+        # Stabilization state for growing text (time-based)
+        self._settle_time_ms = settle_time_ms
+        self._pending_text: str | None = None     # buffered text waiting to stabilize
+        self._last_change_time: float | None = None  # monotonic time of last text change
+
+    def set_settle_time(self, ms: int) -> None:
+        """Update settle time (called when user changes the setting)."""
+        self._settle_time_ms = ms
 
     def _is_growth(self, old_text: str, new_text: str) -> bool:
         """Check if new_text is old_text with more content appended.
@@ -77,18 +193,16 @@ class TextDiffer:
 
         return False
 
-    def _is_similar(self, text_a: str, text_b: str) -> bool:
-        """Check if two texts are similar enough to be the same subtitle."""
-        clean_a = _clean(text_a)
-        clean_b = _clean(text_b)
-
-        if clean_a == clean_b:
+    def _is_settled(self) -> bool:
+        """Check if enough time has passed since last text change."""
+        if self._last_change_time is None:
             return True
+        elapsed_ms = (time.monotonic() - self._last_change_time) * 1000
+        return elapsed_ms >= self._settle_time_ms
 
-        if SequenceMatcher(None, clean_a, clean_b).ratio() >= self._threshold:
-            return True
-
-        return False
+    def _mark_changed(self) -> None:
+        """Record that text just changed (reset settle timer)."""
+        self._last_change_time = time.monotonic()
 
     def get_new_text(self, current_text: str) -> str | None:
         """Return text to speak, or None if no meaningful change detected."""
@@ -108,12 +222,11 @@ class TextDiffer:
             clean_new = _clean(current_text)
             clean_pending = _clean(self._pending_text)
 
-            # Exact match (cleaned) → definitely stable
+            # Exact match (cleaned) → check settle time
             if clean_new == clean_pending:
-                self._stable_count += 1
                 self._pending_text = current_text
-                print(f"[TextDiffer] Stability: {self._stable_count}/{self.STABLE_CYCLES}")
-                if self._stable_count >= self.STABLE_CYCLES:
+                if self._is_settled():
+                    print(f"[TextDiffer] Settled (time elapsed)")
                     return self._flush_pending()
                 return None
 
@@ -124,7 +237,7 @@ class TextDiffer:
             # Pending is a prefix of new → text is STILL growing
             if self._is_growth(self._pending_text, current_text):
                 self._pending_text = current_text
-                self._stable_count = 0  # reset — still growing
+                self._mark_changed()  # reset settle timer
                 print(f"[TextDiffer] Still growing: ...{repr(clean_new[-60:])}")
                 return None
 
@@ -132,12 +245,11 @@ class TextDiffer:
             if clean_new in clean_pending:
                 return None
 
-            # Similar to pending (OCR jitter, same length) → count as stable
-            if self._is_similar(current_text, self._pending_text):
-                self._stable_count += 1
+            # Similar to pending (OCR jitter, same length) → check settle
+            if is_text_similar(current_text, self._pending_text, self._threshold):
                 self._pending_text = current_text
-                print(f"[TextDiffer] Stability (jitter): {self._stable_count}/{self.STABLE_CYCLES}")
-                if self._stable_count >= self.STABLE_CYCLES:
+                if self._is_settled():
+                    print(f"[TextDiffer] Settled (jitter, time elapsed)")
                     return self._flush_pending()
                 return None
 
@@ -165,7 +277,7 @@ class TextDiffer:
         if self._is_growth(self._last_spoken, current_text):
             # Text grew — buffer it, don't emit yet
             self._pending_text = current_text
-            self._stable_count = 0
+            self._mark_changed()
             print(f"[TextDiffer] Growth detected, buffering: ...{repr(clean_new[-60:])}")
             return None
 
@@ -176,24 +288,21 @@ class TextDiffer:
             overlap = 0
             for i, spoken_line in enumerate(spoken_lines):
                 if i < len(new_lines):
-                    line_ratio = SequenceMatcher(
-                        None, _clean(spoken_line), _clean(new_lines[i])
-                    ).ratio()
-                    if line_ratio > 0.7:
+                    clean_s = _clean(spoken_line)
+                    clean_n = _clean(new_lines[i])
+                    if is_text_similar(clean_s, clean_n, 0.7):
                         overlap = i + 1
                     else:
                         break
             if overlap > 0:
                 # New lines appeared — buffer for stabilization
                 self._pending_text = current_text
-                self._stable_count = 0
+                self._mark_changed()
                 print(f"[TextDiffer] New lines detected, buffering")
                 return None
 
-        ratio = SequenceMatcher(None, clean_spoken, clean_new).ratio()
-
         # High similarity = OCR jitter, not a real change
-        if ratio >= self._threshold:
+        if is_text_similar(clean_spoken, clean_new, self._threshold):
             return None
 
         # Text changed substantially — this is a completely new subtitle
@@ -231,10 +340,7 @@ class TextDiffer:
             overlap = 0
             for i, old_line in enumerate(old_lines):
                 if i < len(new_lines):
-                    line_ratio = SequenceMatcher(
-                        None, _clean(old_line), _clean(new_lines[i])
-                    ).ratio()
-                    if line_ratio > 0.7:
+                    if is_text_similar(_clean(old_line), _clean(new_lines[i]), 0.7):
                         overlap = i + 1
                     else:
                         break
@@ -269,7 +375,7 @@ class TextDiffer:
     def _clear_pending(self) -> None:
         """Clear the stabilization buffer."""
         self._pending_text = None
-        self._stable_count = 0
+        self._last_change_time = None
 
     def reset(self) -> None:
         self._last_spoken = ""

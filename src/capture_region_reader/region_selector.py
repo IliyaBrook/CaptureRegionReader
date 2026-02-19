@@ -146,6 +146,17 @@ class RegionSelector(QWidget):
             height = y2 - y1
 
             if width > 10 and height > 10:
+                # Find which screen the start point is on for diagnostics
+                from PyQt6.QtGui import QGuiApplication as _App
+                _screens = _App.screens()
+                for _s in _screens:
+                    _g = _s.geometry()
+                    if _g.contains(self._start_pos.x(), self._start_pos.y()):
+                        print(
+                            f"[Region] Screen: {_s.name()} geo=({_g.x()},{_g.y()}) "
+                            f"{_g.width()}x{_g.height()} DPR={_s.devicePixelRatio()}"
+                        )
+                        break
                 print(
                     f"[Region] Qt start=({self._start_pos.x()},{self._start_pos.y()}) "
                     f"end=({end_pos.x()},{end_pos.y()}) → "

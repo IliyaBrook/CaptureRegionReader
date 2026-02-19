@@ -2,17 +2,26 @@ from __future__ import annotations
 
 import asyncio
 import os
+import re
 import subprocess
 import tempfile
 import time
+import wave
 from queue import Empty, Queue
+from typing import Protocol
 
+import numpy as np
 from PyQt6.QtCore import QThread, pyqtSignal
 
 
 # edge-tts voice IDs
 VOICE_EN = "en-US-AndrewNeural"
 VOICE_RU = "ru-RU-DmitryNeural"
+
+# Silero TTS settings (same as ai-reader-assistant)
+SILERO_MODEL_ID = "v4_ru"
+SILERO_SPEAKER = "xenia"
+SILERO_SAMPLE_RATE = 48000
 
 
 def detect_language(text: str) -> str:
@@ -27,6 +36,187 @@ def detect_language(text: str) -> str:
     return "ru" if cyrillic / total > 0.5 else "en"
 
 
+# ── TTS Engine Protocol ────────────────────────────────────────────
+
+class TtsEngine(Protocol):
+    """Protocol for TTS backends."""
+
+    def generate(self, text: str, lang: str, output_path: str) -> None:
+        """Generate audio file from text.
+
+        Args:
+            text: Text to synthesize.
+            lang: Language code ("en" or "ru").
+            output_path: Path to write the audio file.
+        """
+        ...
+
+    @property
+    def audio_suffix(self) -> str:
+        """File extension for generated audio ('.mp3' or '.wav')."""
+        ...
+
+
+# ── Edge-TTS Engine (cloud, requires internet) ────────────────────
+
+class EdgeTtsEngine:
+    """Microsoft Edge neural TTS via edge-tts library.
+
+    High quality, requires internet connection.
+    Generates MP3 files.
+    """
+
+    def __init__(self) -> None:
+        self._loop: asyncio.AbstractEventLoop | None = None
+        self._rate: str = "+0%"
+        self._volume: str = "+0%"
+
+    @property
+    def audio_suffix(self) -> str:
+        return ".mp3"
+
+    def set_rate(self, rate_pct: str) -> None:
+        self._rate = rate_pct
+
+    def set_volume(self, volume_pct: str) -> None:
+        self._volume = volume_pct
+
+    def generate(self, text: str, lang: str, output_path: str) -> None:
+        import edge_tts
+
+        if self._loop is None:
+            self._loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(self._loop)
+
+        voice = VOICE_RU if lang == "ru" else VOICE_EN
+        communicate = edge_tts.Communicate(
+            text, voice, rate=self._rate, volume=self._volume
+        )
+        self._loop.run_until_complete(communicate.save(output_path))
+
+    def close(self) -> None:
+        if self._loop is not None:
+            self._loop.close()
+            self._loop = None
+
+
+# ── Silero TTS Engine (local, GPU-accelerated) ────────────────────
+
+class SileroTtsEngine:
+    """Silero TTS v4 — high-quality local neural TTS.
+
+    Uses torch.hub to download models on first use.
+    Russian: speaker 'xenia' at 48kHz — expressive, natural voice.
+    English: falls back to edge-tts (Silero v4 is Russian-only).
+    Works offline after first download.
+    """
+
+    def __init__(self) -> None:
+        self._model = None
+        self._device = None
+        self._edge_fallback: EdgeTtsEngine | None = None
+
+    @property
+    def audio_suffix(self) -> str:
+        return ".wav"
+
+    def _ensure_loaded(self) -> None:
+        """Lazy-load Silero model on first use."""
+        if self._model is not None:
+            return
+
+        import torch
+
+        self._device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        print(f"[Silero] Loading model {SILERO_MODEL_ID} on {self._device}...")
+
+        model, _ = torch.hub.load(
+            repo_or_dir="snakers4/silero-models",
+            model="silero_tts",
+            language="ru",
+            speaker=SILERO_MODEL_ID,
+        )
+        model.to(self._device)
+        self._model = model
+        print(f"[Silero] Model loaded on {self._device}")
+
+    def generate(self, text: str, lang: str, output_path: str) -> None:
+        # Silero v4 only supports Russian; for English fall back to edge-tts
+        if lang != "ru":
+            if self._edge_fallback is None:
+                self._edge_fallback = EdgeTtsEngine()
+                print("[Silero] English text → falling back to Edge-TTS")
+            # Edge-TTS generates MP3, but we need WAV suffix consistency
+            # Just generate MP3 with edge-tts and let ffplay handle it
+            mp3_path = output_path.replace(".wav", ".mp3")
+            self._edge_fallback.generate(text, lang, mp3_path)
+            # Rename so caller finds the file at output_path
+            os.rename(mp3_path, output_path)
+            return
+
+        self._ensure_loaded()
+
+        import torch
+        import scipy.io.wavfile
+
+        # Split into sentences for better intonation
+        sentences = re.split(r"(?<=[.!?])\s+", text)
+        audio_chunks = []
+
+        for sentence in sentences:
+            sentence = sentence.strip()
+            if not sentence:
+                continue
+            audio = self._model.apply_tts(
+                text=sentence,
+                speaker=SILERO_SPEAKER,
+                sample_rate=SILERO_SAMPLE_RATE,
+            )
+            audio_np = audio.cpu().numpy() if torch.is_tensor(audio) else audio
+            audio_chunks.append(audio_np)
+
+        if audio_chunks:
+            full_audio = np.concatenate(audio_chunks)
+            scipy.io.wavfile.write(output_path, SILERO_SAMPLE_RATE, full_audio)
+        else:
+            # Empty audio — write a silent WAV
+            with wave.open(output_path, "wb") as wf:
+                wf.setnchannels(1)
+                wf.setsampwidth(2)
+                wf.setframerate(SILERO_SAMPLE_RATE)
+                wf.writeframes(b"")
+
+    def close(self) -> None:
+        self._model = None
+        self._device = None
+        if self._edge_fallback is not None:
+            self._edge_fallback.close()
+            self._edge_fallback = None
+
+
+# ── Engine factory ─────────────────────────────────────────────────
+
+def create_tts_engine(name: str) -> TtsEngine:
+    """Create a TTS engine by name.
+
+    Args:
+        name: "edge-tts" or "silero".
+
+    Returns:
+        A TTS engine instance.
+    """
+    if name == "silero":
+        try:
+            import torch  # noqa: F401
+            return SileroTtsEngine()
+        except ImportError:
+            print("[TTS] torch not installed, falling back to edge-tts")
+            return EdgeTtsEngine()
+    return EdgeTtsEngine()
+
+
+# ── TTS Worker Thread ──────────────────────────────────────────────
+
 class TtsWorker(QThread):
     speech_started = pyqtSignal()
     speech_finished = pyqtSignal()
@@ -35,24 +225,52 @@ class TtsWorker(QThread):
     def __init__(self) -> None:
         super().__init__()
         self._queue: Queue[str | None] = Queue()
+        self._rate_wpm: int = 150
         self._speech_rate: str = "+0%"  # edge-tts rate format
         self._volume: str = "+0%"
+        self._volume_float: float = 1.0
         self._auto_language: bool = True
         self._fixed_language: str = "en"
         self._cancel_requested: bool = False
         self._current_process: subprocess.Popen | None = None
+        self._engine: TtsEngine | None = None
+        self._engine_name: str = ""  # empty so first set_engine() always triggers
+
+    def set_engine(self, name: str) -> None:
+        """Switch TTS engine at runtime."""
+        print(f"[TTS] set_engine called: '{name}' (current: '{self._engine_name}', "
+              f"engine type: {type(self._engine).__name__})")
+        if name == self._engine_name:
+            print(f"[TTS] set_engine: same name, skipping")
+            return
+        old_name = self._engine_name
+        self._engine_name = name
+        # Close old engine
+        if self._engine is not None and hasattr(self._engine, "close"):
+            self._engine.close()
+        self._engine = create_tts_engine(name)
+        # Re-apply rate/volume to the new engine
+        self._apply_rate_volume()
+        print(f"[TTS] Switched engine: {old_name} -> {name} "
+              f"(now: {type(self._engine).__name__})")
 
     def set_rate(self, rate: int) -> None:
-        # Convert wpm slider (50-350, default 150) to edge-tts percentage
-        # 150 wpm = +0%, 50 wpm = -67%, 350 wpm = +133%
+        self._rate_wpm = rate
         pct = int((rate - 150) / 150 * 100)
         self._speech_rate = f"{pct:+d}%"
+        self._apply_rate_volume()
 
     def set_volume(self, volume: float) -> None:
-        # Convert 0.0-1.0 to edge-tts format
-        # 1.0 = +0%, 0.5 = -50%, 0.0 = -100%
+        self._volume_float = volume
         pct = int((volume - 1.0) * 100)
         self._volume = f"{pct:+d}%"
+        self._apply_rate_volume()
+
+    def _apply_rate_volume(self) -> None:
+        """Forward rate/volume to the active engine (if it supports it)."""
+        if isinstance(self._engine, EdgeTtsEngine):
+            self._engine.set_rate(self._speech_rate)
+            self._engine.set_volume(self._volume)
 
     def set_language(self, lang: str) -> None:
         if lang == "eng+rus":
@@ -78,9 +296,6 @@ class TtsWorker(QThread):
                 break
 
     def run(self) -> None:
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-
         while True:
             try:
                 text = self._queue.get(timeout=0.5)
@@ -94,26 +309,23 @@ class TtsWorker(QThread):
                 continue
 
             try:
-                # Determine voice
+                # Determine language
                 if self._auto_language:
                     lang = detect_language(text)
                 else:
                     lang = self._fixed_language
 
-                voice = VOICE_RU if lang == "ru" else VOICE_EN
-
                 self.speech_started.emit()
-                print(f"[TTS] Generating: {repr(text[:60])}")
+                print(f"[TTS/{self._engine_name}] Generating: {repr(text[:60])}")
 
-                # Generate audio with edge-tts
-                tmp_file = tempfile.mktemp(suffix=".mp3")
+                # Generate audio
+                suffix = self._engine.audio_suffix
+                tmp_file = tempfile.mktemp(suffix=suffix)
                 try:
                     t0 = time.monotonic()
-                    loop.run_until_complete(
-                        self._generate_audio(text, voice, tmp_file)
-                    )
+                    self._engine.generate(text, lang, tmp_file)
                     gen_ms = int((time.monotonic() - t0) * 1000)
-                    print(f"[TTS] Generated in {gen_ms}ms, playing...")
+                    print(f"[TTS/{self._engine_name}] Generated in {gen_ms}ms, playing...")
 
                     if self._cancel_requested:
                         continue
@@ -143,20 +355,9 @@ class TtsWorker(QThread):
             except Exception as e:
                 self.error_occurred.emit(str(e))
 
-        loop.close()
-
-    async def _generate_audio(self, text: str, voice: str, output_path: str) -> None:
-        import edge_tts
-
-        communicate = edge_tts.Communicate(
-            text,
-            voice,
-            rate=self._speech_rate,
-            volume=self._volume,
-        )
-        await communicate.save(output_path)
-
     def shutdown(self) -> None:
         self.cancel()
         self._queue.put(None)
         self.wait(5000)
+        if self._engine is not None and hasattr(self._engine, "close"):
+            self._engine.close()
