@@ -134,9 +134,8 @@ class App:
                 img_array = np.array(screenshot, dtype=np.uint8)
                 raw_rgb = img_array[:, :, :3][:, :, ::-1].copy()
 
-                use_isolation = getattr(
-                    self._ocr_worker._engine, "needs_text_isolation", True
-                )
+                engine = self._ocr_worker._engine
+                use_isolation = getattr(engine, "needs_text_isolation", True) if engine else True
 
                 if use_isolation:
                     # Tesseract: text_isolator → upscale

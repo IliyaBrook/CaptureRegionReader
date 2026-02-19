@@ -14,7 +14,7 @@ class AppSettings:
     volume: float = 1.0
     ocr_interval_ms: int = 500
     ocr_engine: str = "tesseract"  # "tesseract" | "easyocr"
-    tts_engine: str = "piper"      # "piper" (local) | "edge-tts" (cloud)
+    tts_engine: str = "silero"     # "silero" (local, GPU) | "edge-tts" (cloud)
     settle_time_ms: int = 300      # 0-2000ms, text stabilization delay
 
     def save(self) -> None:
@@ -56,6 +56,6 @@ class AppSettings:
             volume=float(s.value("volume", 1.0)),
             ocr_interval_ms=int(s.value("ocr_interval_ms", 500)),
             ocr_engine=str(s.value("ocr_engine", "tesseract")),
-            tts_engine=str(s.value("tts_engine", "piper")),
+            tts_engine=str(s.value("tts_engine", "silero")),
             settle_time_ms=int(s.value("settle_time_ms", 300)),
         )

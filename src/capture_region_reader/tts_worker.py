@@ -2,11 +2,11 @@ from __future__ import annotations
 
 import asyncio
 import os
+import re
 import subprocess
 import tempfile
 import time
 import wave
-from pathlib import Path
 from queue import Empty, Queue
 from typing import Protocol
 
@@ -18,10 +18,10 @@ from PyQt6.QtCore import QThread, pyqtSignal
 VOICE_EN = "en-US-AndrewNeural"
 VOICE_RU = "ru-RU-DmitryNeural"
 
-# Piper model directory (shared with ai-reader-assistant)
-_PIPER_MODELS_DIR = Path("/mnt/DiskE_Crucial/codding/My_Projects/ai-reader-assistant/models/piper")
-PIPER_VOICE_EN = "en_US-amy-medium"
-PIPER_VOICE_RU = "ru_RU-irina-medium"
+# Silero TTS settings (same as ai-reader-assistant)
+SILERO_MODEL_ID = "v4_ru"
+SILERO_SPEAKER = "xenia"
+SILERO_SAMPLE_RATE = 48000
 
 
 def detect_language(text: str) -> str:
@@ -100,69 +100,98 @@ class EdgeTtsEngine:
             self._loop = None
 
 
-# ── Piper TTS Engine (local ONNX, offline) ────────────────────────
+# ── Silero TTS Engine (local, GPU-accelerated) ────────────────────
 
-class PiperTtsEngine:
-    """Piper TTS — fast local neural TTS using ONNX runtime.
+class SileroTtsEngine:
+    """Silero TTS v4 — high-quality local neural TTS.
 
-    Works offline, no internet required.
-    Generates WAV files.
-    Models: en_US-amy-medium, ru_RU-irina-medium.
+    Uses torch.hub to download models on first use.
+    Russian: speaker 'xenia' at 48kHz — expressive, natural voice.
+    English: falls back to edge-tts (Silero v4 is Russian-only).
+    Works offline after first download.
     """
 
     def __init__(self) -> None:
-        self._voice_en = None
-        self._voice_ru = None
-        self._loaded = False
+        self._model = None
+        self._device = None
+        self._edge_fallback: EdgeTtsEngine | None = None
 
     @property
     def audio_suffix(self) -> str:
         return ".wav"
 
-    def _ensure_loaded(self, lang: str) -> None:
-        """Lazy-load Piper voices on first use."""
-        if lang == "ru" and self._voice_ru is not None:
-            return
-        if lang == "en" and self._voice_en is not None:
+    def _ensure_loaded(self) -> None:
+        """Lazy-load Silero model on first use."""
+        if self._model is not None:
             return
 
-        from piper import PiperVoice
+        import torch
 
-        if lang == "ru" and self._voice_ru is None:
-            model = _PIPER_MODELS_DIR / f"{PIPER_VOICE_RU}.onnx"
-            config = _PIPER_MODELS_DIR / f"{PIPER_VOICE_RU}.onnx.json"
-            if model.exists() and config.exists():
-                self._voice_ru = PiperVoice.load(str(model), str(config))
-                print(f"[Piper] Loaded Russian voice: {PIPER_VOICE_RU}")
-            else:
-                raise FileNotFoundError(
-                    f"Piper Russian model not found at {model}"
-                )
+        self._device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        print(f"[Silero] Loading model {SILERO_MODEL_ID} on {self._device}...")
 
-        if lang == "en" and self._voice_en is None:
-            model = _PIPER_MODELS_DIR / f"{PIPER_VOICE_EN}.onnx"
-            config = _PIPER_MODELS_DIR / f"{PIPER_VOICE_EN}.onnx.json"
-            if model.exists() and config.exists():
-                self._voice_en = PiperVoice.load(str(model), str(config))
-                print(f"[Piper] Loaded English voice: {PIPER_VOICE_EN}")
-            else:
-                raise FileNotFoundError(
-                    f"Piper English model not found at {model}"
-                )
+        model, _ = torch.hub.load(
+            repo_or_dir="snakers4/silero-models",
+            model="silero_tts",
+            language="ru",
+            speaker=SILERO_MODEL_ID,
+        )
+        model.to(self._device)
+        self._model = model
+        print(f"[Silero] Model loaded on {self._device}")
 
     def generate(self, text: str, lang: str, output_path: str) -> None:
-        self._ensure_loaded(lang)
+        # Silero v4 only supports Russian; for English fall back to edge-tts
+        if lang != "ru":
+            if self._edge_fallback is None:
+                self._edge_fallback = EdgeTtsEngine()
+                print("[Silero] English text → falling back to Edge-TTS")
+            # Edge-TTS generates MP3, but we need WAV suffix consistency
+            # Just generate MP3 with edge-tts and let ffplay handle it
+            mp3_path = output_path.replace(".wav", ".mp3")
+            self._edge_fallback.generate(text, lang, mp3_path)
+            # Rename so caller finds the file at output_path
+            os.rename(mp3_path, output_path)
+            return
 
-        voice = self._voice_ru if lang == "ru" else self._voice_en
-        if voice is None:
-            raise RuntimeError(f"Piper voice for '{lang}' not loaded")
+        self._ensure_loaded()
 
-        with wave.open(output_path, "wb") as wav_file:
-            voice.synthesize_wav(text, wav_file)
+        import torch
+        import scipy.io.wavfile
+
+        # Split into sentences for better intonation
+        sentences = re.split(r"(?<=[.!?])\s+", text)
+        audio_chunks = []
+
+        for sentence in sentences:
+            sentence = sentence.strip()
+            if not sentence:
+                continue
+            audio = self._model.apply_tts(
+                text=sentence,
+                speaker=SILERO_SPEAKER,
+                sample_rate=SILERO_SAMPLE_RATE,
+            )
+            audio_np = audio.cpu().numpy() if torch.is_tensor(audio) else audio
+            audio_chunks.append(audio_np)
+
+        if audio_chunks:
+            full_audio = np.concatenate(audio_chunks)
+            scipy.io.wavfile.write(output_path, SILERO_SAMPLE_RATE, full_audio)
+        else:
+            # Empty audio — write a silent WAV
+            with wave.open(output_path, "wb") as wf:
+                wf.setnchannels(1)
+                wf.setsampwidth(2)
+                wf.setframerate(SILERO_SAMPLE_RATE)
+                wf.writeframes(b"")
 
     def close(self) -> None:
-        self._voice_en = None
-        self._voice_ru = None
+        self._model = None
+        self._device = None
+        if self._edge_fallback is not None:
+            self._edge_fallback.close()
+            self._edge_fallback = None
 
 
 # ── Engine factory ─────────────────────────────────────────────────
@@ -171,17 +200,17 @@ def create_tts_engine(name: str) -> TtsEngine:
     """Create a TTS engine by name.
 
     Args:
-        name: "edge-tts" or "piper".
+        name: "edge-tts" or "silero".
 
     Returns:
         A TTS engine instance.
     """
-    if name == "piper":
+    if name == "silero":
         try:
-            import piper  # noqa: F401
-            return PiperTtsEngine()
+            import torch  # noqa: F401
+            return SileroTtsEngine()
         except ImportError:
-            print("[TTS] piper-tts not installed, falling back to edge-tts")
+            print("[TTS] torch not installed, falling back to edge-tts")
             return EdgeTtsEngine()
     return EdgeTtsEngine()
 
@@ -204,38 +233,35 @@ class TtsWorker(QThread):
         self._fixed_language: str = "en"
         self._cancel_requested: bool = False
         self._current_process: subprocess.Popen | None = None
-        self._engine: TtsEngine = EdgeTtsEngine()
-        self._engine_name: str = "edge-tts"
+        self._engine: TtsEngine | None = None
+        self._engine_name: str = ""  # empty so first set_engine() always triggers
 
     def set_engine(self, name: str) -> None:
-        """Switch TTS engine at runtime.
-
-        Called from main thread — the engine is recreated on the TTS thread
-        via a flag, since Piper models must be loaded on the worker thread.
-        """
+        """Switch TTS engine at runtime."""
+        print(f"[TTS] set_engine called: '{name}' (current: '{self._engine_name}', "
+              f"engine type: {type(self._engine).__name__})")
         if name == self._engine_name:
+            print(f"[TTS] set_engine: same name, skipping")
             return
+        old_name = self._engine_name
         self._engine_name = name
         # Close old engine
-        if hasattr(self._engine, "close"):
+        if self._engine is not None and hasattr(self._engine, "close"):
             self._engine.close()
         self._engine = create_tts_engine(name)
         # Re-apply rate/volume to the new engine
         self._apply_rate_volume()
-        print(f"[TTS] Switched to engine: {name}")
+        print(f"[TTS] Switched engine: {old_name} -> {name} "
+              f"(now: {type(self._engine).__name__})")
 
     def set_rate(self, rate: int) -> None:
         self._rate_wpm = rate
-        # Convert wpm slider (50-350, default 150) to edge-tts percentage
-        # 150 wpm = +0%, 50 wpm = -67%, 350 wpm = +133%
         pct = int((rate - 150) / 150 * 100)
         self._speech_rate = f"{pct:+d}%"
         self._apply_rate_volume()
 
     def set_volume(self, volume: float) -> None:
         self._volume_float = volume
-        # Convert 0.0-1.0 to edge-tts format
-        # 1.0 = +0%, 0.5 = -50%, 0.0 = -100%
         pct = int((volume - 1.0) * 100)
         self._volume = f"{pct:+d}%"
         self._apply_rate_volume()
@@ -333,5 +359,5 @@ class TtsWorker(QThread):
         self.cancel()
         self._queue.put(None)
         self.wait(5000)
-        if hasattr(self._engine, "close"):
+        if self._engine is not None and hasattr(self._engine, "close"):
             self._engine.close()

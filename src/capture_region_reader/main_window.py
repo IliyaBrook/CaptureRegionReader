@@ -232,8 +232,8 @@ class MainWindow(QMainWindow):
 
         self._combo_tts = QComboBox()
         self._combo_tts.setStyleSheet(_COMBO_STYLE)
-        self._combo_tts.addItem("Piper (local, fast)", "piper")
-        self._combo_tts.addItem("Edge-TTS (cloud, natural)", "edge-tts")
+        self._combo_tts.addItem("Silero (local, AI voice)", "silero")
+        self._combo_tts.addItem("Edge-TTS (cloud)", "edge-tts")
         for i in range(self._combo_tts.count()):
             if self._combo_tts.itemData(i) == settings.tts_engine:
                 self._combo_tts.setCurrentIndex(i)

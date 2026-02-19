@@ -292,8 +292,8 @@ class OcrWorker(QThread):
         self._last_emitted_text: str = ""
         self._growth_detected: bool = False
         self._stable_emits: int = 0
-        self._engine: OcrEngine = TesseractEngine()
-        self._engine_name: str = "tesseract"
+        self._engine: OcrEngine | None = None
+        self._engine_name: str = ""  # empty so first set_engine() always triggers
 
     def configure(
         self,
@@ -320,17 +320,30 @@ class OcrWorker(QThread):
 
     def set_engine(self, engine_name: str) -> None:
         """Switch OCR engine. Safe to call while running."""
+        print(f"[OCR] set_engine called: '{engine_name}' (current: '{self._engine_name}')")
         if engine_name == self._engine_name:
+            print(f"[OCR] set_engine: same name, skipping")
             return
         try:
+            old_name = self._engine_name
             self._engine = create_engine(engine_name)
             self._engine_name = engine_name
-            print(f"[OCR] Switched to engine: {engine_name}")
+            print(f"[OCR] Switched engine: {old_name} -> {engine_name} (now: {type(self._engine).__name__})")
         except ImportError as e:
+            print(f"[OCR] Failed to switch to {engine_name}: {e}")
             self.error_occurred.emit(str(e))
+            # Fallback to Tesseract so OCR keeps working
+            if self._engine is None:
+                self._engine = TesseractEngine()
+                self._engine_name = "tesseract"
+                print("[OCR] Fallback: using Tesseract")
 
     def run(self) -> None:
         self._running = True
+        if self._engine is None:
+            self._engine = TesseractEngine()
+            self._engine_name = "tesseract"
+            print("[OCR] Warning: engine was None at run(), defaulting to Tesseract")
         with mss() as sct:
             while self._running:
                 if not self._region:
