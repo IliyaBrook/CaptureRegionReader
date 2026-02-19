@@ -26,6 +26,11 @@ SILERO_MODEL_ID = "v4_ru"
 SILERO_SPEAKER = "xenia"
 SILERO_SAMPLE_RATE = 48000
 
+# XTTS-v2 settings
+XTTS_MODEL = "tts_models/multilingual/multi-dataset/xtts_v2"
+XTTS_SPEAKER = "Damien Black"  # Male voice, works well with Russian and English
+XTTS_SAMPLE_RATE = 24000
+
 
 def detect_language(text: str) -> str:
     """Detect dominant language based on character analysis."""
@@ -197,13 +202,110 @@ class SileroTtsEngine:
             self._edge_fallback = None
 
 
+# ── XTTS-v2 Engine (local, GPU, multilingual) ─────────────────────
+
+class XttsTtsEngine:
+    """Coqui XTTS-v2 — multilingual neural TTS with voice cloning.
+
+    Supports 17 languages natively including Russian and English.
+    Unlike Silero, can read mixed Russian-English text naturally.
+    Uses GPU for fast inference (~1-2s per sentence).
+    Model is ~1.8 GB, downloaded on first use.
+
+    Key advantage: handles bilingual text in a single pass —
+    no need to split by language or fall back to a different engine.
+    """
+
+    def __init__(self) -> None:
+        self._tts = None
+        self._device: str = "cpu"
+
+    @property
+    def audio_suffix(self) -> str:
+        return ".wav"
+
+    def _ensure_loaded(self) -> None:
+        """Lazy-load XTTS-v2 model on first use."""
+        if self._tts is not None:
+            return
+
+        import torch
+        from TTS.api import TTS
+
+        self._device = "cuda" if torch.cuda.is_available() else "cpu"
+        logger.info("XTTS-v2: loading model on %s...", self._device)
+
+        self._tts = TTS(XTTS_MODEL).to(self._device)
+        logger.info(
+            "XTTS-v2: model loaded, speaker='%s', sample_rate=%d",
+            XTTS_SPEAKER, XTTS_SAMPLE_RATE,
+        )
+
+    def generate(self, text: str, lang: str, output_path: str) -> None:
+        self._ensure_loaded()
+
+        # XTTS uses ISO language codes: "en", "ru", etc.
+        # For mixed text, we use the dominant language.
+        # XTTS can pronounce English words even when lang="ru" and vice versa.
+        xtts_lang = "ru" if lang == "ru" else "en"
+
+        # Split into sentences for better prosody on long texts.
+        # XTTS handles one sentence at a time best.
+        sentences = re.split(r"(?<=[.!?;:])\s+", text)
+        audio_chunks: list[np.ndarray] = []
+
+        for sentence in sentences:
+            sentence = sentence.strip()
+            if not sentence:
+                continue
+
+            # Auto-detect per-sentence language for bilingual text:
+            # if the sentence is mostly Latin, use "en" even in "ru" mode.
+            sent_lang = xtts_lang
+            if xtts_lang == "ru":
+                lat = sum(1 for c in sentence if c.isascii() and c.isalpha())
+                cyr = sum(1 for c in sentence if "\u0400" <= c <= "\u04FF")
+                if lat > cyr and lat > 3:
+                    sent_lang = "en"
+
+            wav = self._tts.tts(
+                text=sentence,
+                speaker=XTTS_SPEAKER,
+                language=sent_lang,
+            )
+            audio_chunks.append(np.array(wav, dtype=np.float32))
+
+        if audio_chunks:
+            # Add small silence between sentences (0.15s)
+            silence = np.zeros(int(XTTS_SAMPLE_RATE * 0.15), dtype=np.float32)
+            parts: list[np.ndarray] = []
+            for i, chunk in enumerate(audio_chunks):
+                parts.append(chunk)
+                if i < len(audio_chunks) - 1:
+                    parts.append(silence)
+            full_audio = np.concatenate(parts)
+
+            import scipy.io.wavfile
+            # XTTS returns float32 in [-1, 1] range
+            scipy.io.wavfile.write(output_path, XTTS_SAMPLE_RATE, full_audio)
+        else:
+            with wave.open(output_path, "wb") as wf:
+                wf.setnchannels(1)
+                wf.setsampwidth(2)
+                wf.setframerate(XTTS_SAMPLE_RATE)
+                wf.writeframes(b"")
+
+    def close(self) -> None:
+        self._tts = None
+
+
 # ── Engine factory ─────────────────────────────────────────────────
 
 def create_tts_engine(name: str) -> TtsEngine:
     """Create a TTS engine by name.
 
     Args:
-        name: "edge-tts" or "silero".
+        name: "edge-tts", "silero", or "xtts".
 
     Returns:
         A TTS engine instance.
@@ -215,6 +317,10 @@ def create_tts_engine(name: str) -> TtsEngine:
     if name == "silero":
         import torch  # noqa: F401
         return SileroTtsEngine()
+    if name == "xtts":
+        import torch  # noqa: F401
+        from TTS.api import TTS  # noqa: F401
+        return XttsTtsEngine()
     if name == "edge-tts":
         import edge_tts  # noqa: F401
         return EdgeTtsEngine()

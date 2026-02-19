@@ -14,8 +14,11 @@ class AppSettings:
     volume: float = 1.0
     ocr_interval_ms: int = 500
     ocr_engine: str = "tesseract"  # "tesseract" | "easyocr"
-    tts_engine: str = "silero"     # "silero" (local, GPU) | "edge-tts" (cloud)
+    tts_engine: str = "xtts"       # "xtts" (local, multilingual) | "silero" (local, RU) | "edge-tts" (cloud)
     settle_time_ms: int = 300      # 0-2000ms, text stabilization delay
+    isolator_mode: str = "default"  # "default" | "box_search"
+    box_color: tuple[int, int, int] | None = None  # RGB (0-255) target background color for box_search mode
+    box_color_tolerance: int = 60  # 0-150, how far from picked color to search
 
     def save(self) -> None:
         s = QSettings("CaptureRegionReader", "CaptureRegionReader")
@@ -35,6 +38,14 @@ class AppSettings:
         s.setValue("ocr_engine", self.ocr_engine)
         s.setValue("tts_engine", self.tts_engine)
         s.setValue("settle_time_ms", self.settle_time_ms)
+        s.setValue("isolator_mode", self.isolator_mode)
+        if self.box_color:
+            s.setValue("box_color/r", self.box_color[0])
+            s.setValue("box_color/g", self.box_color[1])
+            s.setValue("box_color/b", self.box_color[2])
+        else:
+            s.remove("box_color")
+        s.setValue("box_color_tolerance", self.box_color_tolerance)
 
     @classmethod
     def load(cls) -> AppSettings:
@@ -56,6 +67,13 @@ class AppSettings:
             volume=float(s.value("volume", 1.0)),
             ocr_interval_ms=int(s.value("ocr_interval_ms", 500)),
             ocr_engine=str(s.value("ocr_engine", "tesseract")),
-            tts_engine=str(s.value("tts_engine", "silero")),
+            tts_engine=str(s.value("tts_engine", "xtts")),
             settle_time_ms=int(s.value("settle_time_ms", 300)),
+            isolator_mode=str(s.value("isolator_mode", "default")),
+            box_color=(
+                int(s.value("box_color/r", 0)),
+                int(s.value("box_color/g", 0)),
+                int(s.value("box_color/b", 0)),
+            ) if s.contains("box_color/r") else None,
+            box_color_tolerance=int(s.value("box_color_tolerance", 60)),
         )

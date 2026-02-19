@@ -184,6 +184,27 @@ class IsolatorConfig:
     # being clipped at the very edges of the dark bar.
     dark_box_padding_ratio: float = 0.0
 
+    # -- Color box detection (box_search mode) --
+    # Generic version of dark_box detection: finds a rectangular region whose
+    # background matches a user-selected color. Used for YouTube subtitles,
+    # news tickers, or any colored subtitle bar.
+    #
+    # box_search_color: target RGB color (set by user via color picker)
+    box_search_color: tuple[int, int, int] | None = None
+    # How far from the target color (in Euclidean RGB distance) a pixel
+    # can be and still count as "matching". 0=exact match, 60=default.
+    box_search_tolerance: int = 60
+    # Minimum area as fraction of total image area.
+    box_search_min_area_ratio: float = 0.03
+    # Minimum aspect ratio (width / height).
+    box_search_min_aspect_ratio: float = 1.5
+    # Minimum width as fraction of image width.
+    box_search_min_width_ratio: float = 0.25
+    # Maximum internal standard deviation (uniformity check on matching pixels).
+    box_search_max_internal_std: float = 40.0
+    # Padding around the detected box (fraction of box dimensions).
+    box_search_padding_ratio: float = 0.0
+
     # -- Morphological cleanup --
     # Kernel size for opening operation to remove small noise in final binary.
     morph_open_kernel_size: int = 2
@@ -400,6 +421,137 @@ def _crop_to_dark_box(
     y2 = min(img_h, by + bh + pad_y)
 
     return gray[y1:y2, x1:x2], x1, y1
+
+
+# ---------------------------------------------------------------------------
+# Color box detection (box_search mode — universal, any background color)
+# ---------------------------------------------------------------------------
+
+def _find_colored_subtitle_box(
+    rgb: np.ndarray,
+    cfg: IsolatorConfig,
+) -> tuple[int, int, int, int] | None:
+    """Detect a rectangular subtitle bar with a user-specified background color.
+
+    This is the universal version of _find_dark_subtitle_box(). Instead of
+    looking for dark pixels, it looks for pixels close to cfg.box_search_color
+    (set by the user via a color picker).
+
+    Works for any background color: black, yellow, blue, semi-transparent
+    overlays, etc. — as long as the user has picked the correct color.
+
+    Returns (x, y, w, h) of the colored box, or None if not found.
+    """
+    if cfg.box_search_color is None:
+        return None
+
+    img_h, img_w = rgb.shape[:2]
+    img_area = img_h * img_w
+
+    target_r, target_g, target_b = cfg.box_search_color
+    tolerance = cfg.box_search_tolerance
+
+    # Step 1: Create a mask of pixels close to the target color.
+    # Compute Euclidean distance in RGB space for each pixel.
+    # Using float32 to avoid uint8 overflow in squared differences.
+    rgb_f = rgb.astype(np.float32)
+    diff_r = rgb_f[:, :, 0] - target_r
+    diff_g = rgb_f[:, :, 1] - target_g
+    diff_b = rgb_f[:, :, 2] - target_b
+    dist = np.sqrt(diff_r * diff_r + diff_g * diff_g + diff_b * diff_b)
+
+    # Pixels within tolerance → white (foreground), others → black
+    color_mask = np.zeros((img_h, img_w), dtype=np.uint8)
+    color_mask[dist <= tolerance] = 255
+
+    # Step 2: Morphological closing to merge nearby matching patches.
+    # Text inside the box won't match the background color, creating holes.
+    close_k = max(5, img_w // 60)
+    close_kernel = cv2.getStructuringElement(
+        cv2.MORPH_RECT, (close_k, close_k)
+    )
+    color_mask = cv2.morphologyEx(color_mask, cv2.MORPH_CLOSE, close_kernel)
+
+    # Step 3: Find contours
+    contours, _ = cv2.findContours(
+        color_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
+    )
+
+    if not contours:
+        return None
+
+    # Step 4: Evaluate candidates
+    min_area = img_area * cfg.box_search_min_area_ratio
+    min_width = img_w * cfg.box_search_min_width_ratio
+
+    best_candidate: tuple[int, int, int, int] | None = None
+    best_area = 0
+
+    for cnt in contours:
+        x, y, w, h = cv2.boundingRect(cnt)
+        box_area = w * h
+
+        if box_area < min_area:
+            continue
+
+        if h == 0:
+            continue
+        aspect = w / h
+        if aspect < cfg.box_search_min_aspect_ratio:
+            continue
+
+        if w < min_width:
+            continue
+
+        # Uniformity check: measure std of the MATCHING pixels inside the box.
+        # Only look at pixels that are near the target color (the background).
+        # Text pixels (different color) are excluded from this check.
+        roi = rgb[y : y + h, x : x + w]
+        roi_f = roi.astype(np.float32)
+        roi_dist = np.sqrt(
+            (roi_f[:, :, 0] - target_r) ** 2
+            + (roi_f[:, :, 1] - target_g) ** 2
+            + (roi_f[:, :, 2] - target_b) ** 2
+        )
+        matching_pixels = roi_dist[roi_dist <= tolerance]
+
+        # At least 30% of the box must match the target color
+        if len(matching_pixels) < 0.3 * roi_dist.size:
+            continue
+
+        internal_std = float(np.std(matching_pixels))
+        if internal_std > cfg.box_search_max_internal_std:
+            continue
+
+        if box_area > best_area:
+            best_area = box_area
+            best_candidate = (x, y, w, h)
+
+    return best_candidate
+
+
+def _crop_to_colored_box(
+    rgb: np.ndarray,
+    gray: np.ndarray,
+    box: tuple[int, int, int, int],
+    cfg: IsolatorConfig,
+) -> tuple[np.ndarray, np.ndarray, int, int]:
+    """Crop RGB and grayscale images to the colored box region.
+
+    Returns (cropped_rgb, cropped_gray, offset_x, offset_y).
+    """
+    img_h, img_w = gray.shape
+    bx, by, bw, bh = box
+
+    pad_x = int(bw * cfg.box_search_padding_ratio)
+    pad_y = int(bh * cfg.box_search_padding_ratio)
+
+    x1 = max(0, bx - pad_x)
+    y1 = max(0, by - pad_y)
+    x2 = min(img_w, bx + bw + pad_x)
+    y2 = min(img_h, by + bh + pad_y)
+
+    return rgb[y1:y2, x1:x2], gray[y1:y2, x1:x2], x1, y1
 
 
 # ---------------------------------------------------------------------------
@@ -772,6 +924,7 @@ def _select_subtitle_lines(
 def isolate_text(
     rgb: np.ndarray,
     config: IsolatorConfig | None = None,
+    mode: str = "default",
 ) -> np.ndarray | None:
     """Isolate subtitle text from a screenshot.
 
@@ -785,6 +938,9 @@ def isolate_text(
         rgb: Input image in RGB format (H x W x 3).
         config: Optional configuration override. Uses module defaults
                 if not provided.
+        mode: Isolation mode. "default" uses the standard pipeline with
+              automatic dark-box detection. "box_search" uses the
+              user-selected color to find and crop to a subtitle box.
     """
     cfg = config or _default_config
 
@@ -800,21 +956,32 @@ def isolate_text(
     if _is_blank_frame(gray, cfg):
         return None
 
-    # Step 0: dark subtitle box detection.
-    # Broadcasts and news programs place subtitles in a dark rectangular
-    # bar on a complex multi-colored background. Otsu on the full image
-    # picks up noise from logos, red bars, photos, etc. If we detect such
-    # a box, we crop to it first so the character detection pipeline runs
-    # on a clean, uniformly dark background.
-    dark_box = _find_dark_subtitle_box(gray, cfg)
-    if dark_box is not None:
-        gray, _, _ = _crop_to_dark_box(gray, dark_box, cfg)
-        # Update dimensions to match the cropped region.
-        # All subsequent steps operate on this smaller image.
-        h, w = gray.shape
+    if mode == "box_search" and cfg.box_search_color is not None:
+        # Box search mode: find a subtitle box matching the user-picked color.
+        # Operates on the RGB image (color-based detection), then crops both
+        # RGB and grayscale to the box region.
+        color_box = _find_colored_subtitle_box(rgb, cfg)
+        if color_box is not None:
+            rgb, gray, _, _ = _crop_to_colored_box(rgb, gray, color_box, cfg)
+            h, w = gray.shape
+            if h < 10 or w < 10:
+                return None
+    else:
+        # Default mode: dark subtitle box detection.
+        # Broadcasts and news programs place subtitles in a dark rectangular
+        # bar on a complex multi-colored background. Otsu on the full image
+        # picks up noise from logos, red bars, photos, etc. If we detect such
+        # a box, we crop to it first so the character detection pipeline runs
+        # on a clean, uniformly dark background.
+        dark_box = _find_dark_subtitle_box(gray, cfg)
+        if dark_box is not None:
+            gray, _, _ = _crop_to_dark_box(gray, dark_box, cfg)
+            # Update dimensions to match the cropped region.
+            # All subsequent steps operate on this smaller image.
+            h, w = gray.shape
 
-        if h < 10 or w < 10:
-            return None
+            if h < 10 or w < 10:
+                return None
 
     # Step 1: find character boxes (brightness-filtered)
     boxes, text_is_bright = _find_char_boxes(gray, cfg)

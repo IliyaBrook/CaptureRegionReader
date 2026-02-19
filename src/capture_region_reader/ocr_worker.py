@@ -24,7 +24,7 @@ from mss import mss
 from PIL import Image
 from PyQt6.QtCore import QThread, pyqtSignal
 
-from capture_region_reader.text_isolator import isolate_text
+from capture_region_reader.text_isolator import IsolatorConfig, isolate_text
 
 logger = logging.getLogger(__name__)
 
@@ -958,6 +958,8 @@ class OcrWorker(QThread):
         self._capture_count: int = 0
         self._engine: OcrEngine | None = None
         self._engine_name: str = ""
+        self._isolator_mode: str = "default"
+        self._isolator_config: IsolatorConfig = IsolatorConfig()
 
     def configure(
         self,
@@ -1009,6 +1011,24 @@ class OcrWorker(QThread):
                 self._engine_name = "tesseract"
                 logger.info("No engine loaded, defaulting to Tesseract")
 
+    def set_isolator_mode(self, mode: str) -> None:
+        """Set text isolation mode ('default' or 'box_search')."""
+        self._isolator_mode = mode
+        logger.info("Isolator mode set to: %s", mode)
+
+    def set_box_color(self, color: tuple[int, int, int] | None) -> None:
+        """Set the target background color for box_search mode."""
+        self._isolator_config.box_search_color = color
+        if color:
+            logger.info("Box search color set to: RGB(%d, %d, %d)", *color)
+        else:
+            logger.info("Box search color cleared")
+
+    def set_box_color_tolerance(self, tolerance: int) -> None:
+        """Set the color tolerance for box_search mode."""
+        self._isolator_config.box_search_tolerance = tolerance
+        logger.info("Box search tolerance set to: %d", tolerance)
+
     def run(self) -> None:
         """Main OCR loop: capture -> preprocess -> recognize -> emit."""
         self._running = True
@@ -1052,7 +1072,11 @@ class OcrWorker(QThread):
 
         if use_isolation:
             # Tesseract path: text_isolator creates clean black-on-white image
-            isolated = isolate_text(raw_rgb)
+            isolated = isolate_text(
+                raw_rgb,
+                config=self._isolator_config,
+                mode=self._isolator_mode,
+            )
 
             if isolated is None:
                 p_h, p_w = raw_rgb.shape[:2]

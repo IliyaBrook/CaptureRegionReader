@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 from PyQt6.QtCore import Qt, pyqtSignal
-from PyQt6.QtGui import QIcon, QImage, QKeySequence, QPixmap
+from PyQt6.QtGui import QColor, QIcon, QImage, QKeySequence, QMouseEvent, QPixmap
 from PyQt6.QtWidgets import (
     QCheckBox,
+    QColorDialog,
     QComboBox,
     QFormLayout,
     QGroupBox,
@@ -104,6 +105,9 @@ class MainWindow(QMainWindow):
     ocr_engine_changed = pyqtSignal(str)
     tts_engine_changed = pyqtSignal(str)
     settle_time_changed = pyqtSignal(int)
+    isolator_mode_changed = pyqtSignal(str)
+    box_color_changed = pyqtSignal(object)       # tuple[int,int,int] | None
+    box_color_tolerance_changed = pyqtSignal(int)
 
     def __init__(self, settings: AppSettings) -> None:
         super().__init__()
@@ -233,7 +237,8 @@ class MainWindow(QMainWindow):
 
         self._combo_tts = QComboBox()
         self._combo_tts.setStyleSheet(_COMBO_STYLE)
-        self._combo_tts.addItem("Silero (local, AI voice)", "silero")
+        self._combo_tts.addItem("XTTS-v2 (local, multilingual)", "xtts")
+        self._combo_tts.addItem("Silero (local, Russian only)", "silero")
         self._combo_tts.addItem("Edge-TTS (cloud)", "edge-tts")
         for i in range(self._combo_tts.count()):
             if self._combo_tts.itemData(i) == settings.tts_engine:
@@ -245,6 +250,96 @@ class MainWindow(QMainWindow):
         lang_layout.addRow(_lbl_tts, self._combo_tts)
 
         layout.addWidget(lang_group)
+
+        # --- Text Isolation Mode section ---
+        isolator_group = QGroupBox("Text Isolation")
+        isolator_layout = QFormLayout(isolator_group)
+        isolator_layout.setSpacing(8)
+        isolator_layout.setContentsMargins(10, 16, 10, 10)
+        isolator_layout.setFieldGrowthPolicy(
+            QFormLayout.FieldGrowthPolicy.ExpandingFieldsGrow
+        )
+        isolator_layout.setLabelAlignment(
+            Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
+        )
+
+        self._combo_isolator = QComboBox()
+        self._combo_isolator.setStyleSheet(_COMBO_STYLE)
+        self._combo_isolator.addItem("Default (auto detect)", "default")
+        self._combo_isolator.addItem("Box Search (pick color)", "box_search")
+        for i in range(self._combo_isolator.count()):
+            if self._combo_isolator.itemData(i) == settings.isolator_mode:
+                self._combo_isolator.setCurrentIndex(i)
+                break
+        self._combo_isolator.currentIndexChanged.connect(self._on_isolator_mode_changed)
+        _lbl_isolator = QLabel("Mode:")
+        _lbl_isolator.setStyleSheet(_FORM_LABEL_STYLE)
+        isolator_layout.addRow(_lbl_isolator, self._combo_isolator)
+
+        # Color picker row: swatch + pick button + eyedropper button
+        color_row = QHBoxLayout()
+
+        self._color_swatch = QLabel()
+        self._color_swatch.setFixedSize(28, 28)
+        self._color_swatch.setStyleSheet(
+            "QLabel { border: 2px solid #555; border-radius: 3px; }"
+        )
+        self._update_color_swatch(settings.box_color)
+        color_row.addWidget(self._color_swatch)
+
+        self._btn_pick_color = QPushButton("Pick Color")
+        self._btn_pick_color.setToolTip("Open a color dialog to choose the background color")
+        self._btn_pick_color.clicked.connect(self._on_pick_color_dialog)
+        color_row.addWidget(self._btn_pick_color)
+
+        self._btn_eyedropper = QPushButton("Eyedropper")
+        self._btn_eyedropper.setToolTip(
+            "Click on the capture preview to sample a color"
+        )
+        self._btn_eyedropper.setCheckable(True)
+        self._btn_eyedropper.clicked.connect(self._on_eyedropper_toggled)
+        color_row.addWidget(self._btn_eyedropper)
+
+        color_row.addStretch()
+
+        color_widget = QWidget()
+        color_widget.setLayout(color_row)
+        _lbl_color = QLabel("Box Color:")
+        _lbl_color.setStyleSheet(_FORM_LABEL_STYLE)
+        isolator_layout.addRow(_lbl_color, color_widget)
+
+        # Tolerance slider
+        tolerance_row = QHBoxLayout()
+        self._slider_tolerance = QSlider(Qt.Orientation.Horizontal)
+        self._slider_tolerance.setRange(10, 150)
+        self._slider_tolerance.setSingleStep(5)
+        self._slider_tolerance.setValue(settings.box_color_tolerance)
+        self._slider_tolerance.valueChanged.connect(self._on_tolerance_changed)
+        tolerance_row.addWidget(self._slider_tolerance, stretch=1)
+        self._lbl_tolerance = QLabel(f"{settings.box_color_tolerance}")
+        self._lbl_tolerance.setFixedWidth(40)
+        self._lbl_tolerance.setAlignment(
+            Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
+        )
+        tolerance_row.addWidget(self._lbl_tolerance)
+
+        tolerance_widget = QWidget()
+        tolerance_widget.setLayout(tolerance_row)
+        _lbl_tol = QLabel("Tolerance:")
+        _lbl_tol.setStyleSheet(_FORM_LABEL_STYLE)
+        isolator_layout.addRow(_lbl_tol, tolerance_widget)
+
+        # Show/hide box-search controls based on current mode
+        self._box_search_widgets = [
+            _lbl_color, color_widget, _lbl_tol, tolerance_widget,
+        ]
+        is_box_mode = settings.isolator_mode == "box_search"
+        for w_ in self._box_search_widgets:
+            w_.setVisible(is_box_mode)
+
+        self._eyedropper_active = False
+
+        layout.addWidget(isolator_group)
 
         # --- Settings sliders ---
         _SLIDER_LABEL_W = 80
@@ -349,6 +444,8 @@ class MainWindow(QMainWindow):
         self._capture_preview.setStyleSheet(
             "QLabel { background-color: #1a1a1a; color: #666; padding: 4px; }"
         )
+        # Enable mouse tracking for eyedropper
+        self._capture_preview.mousePressEvent = self._preview_mouse_press
         self._preview_scroll.setWidget(self._capture_preview)
 
         preview_layout.addWidget(self._preview_scroll)
@@ -411,6 +508,106 @@ class MainWindow(QMainWindow):
         self._lbl_interval.setText(f"{value} ms")
         self.settings.ocr_interval_ms = value
         self.interval_changed.emit(value)
+
+    def _on_isolator_mode_changed(self, index: int) -> None:
+        mode = self._combo_isolator.itemData(index)
+        self.settings.isolator_mode = mode
+        is_box = mode == "box_search"
+        for w_ in self._box_search_widgets:
+            w_.setVisible(is_box)
+        self.isolator_mode_changed.emit(mode)
+
+    def _update_color_swatch(self, color: tuple[int, int, int] | None) -> None:
+        """Update the color swatch label to show the current box color."""
+        if color is not None:
+            r, g, b = color
+            self._color_swatch.setStyleSheet(
+                f"QLabel {{ background-color: rgb({r},{g},{b}); "
+                f"border: 2px solid #555; border-radius: 3px; }}"
+            )
+            self._color_swatch.setToolTip(f"RGB({r}, {g}, {b})")
+        else:
+            self._color_swatch.setStyleSheet(
+                "QLabel { border: 2px solid #555; border-radius: 3px; "
+                "background-color: transparent; }"
+            )
+            self._color_swatch.setToolTip("No color selected")
+
+    def _on_pick_color_dialog(self) -> None:
+        """Open a QColorDialog to pick the box background color."""
+        initial = QColor(0, 0, 0)
+        if self.settings.box_color:
+            initial = QColor(*self.settings.box_color)
+        color = QColorDialog.getColor(initial, self, "Pick Subtitle Background Color")
+        if color.isValid():
+            rgb = (color.red(), color.green(), color.blue())
+            self._set_box_color(rgb)
+
+    def _on_eyedropper_toggled(self, checked: bool) -> None:
+        """Toggle eyedropper mode: next click on preview picks a color."""
+        self._eyedropper_active = checked
+        if checked:
+            self._btn_eyedropper.setStyleSheet(
+                "QPushButton { background-color: #ffcc00; font-weight: bold; }"
+            )
+            self._capture_preview.setCursor(Qt.CursorShape.CrossCursor)
+            self._status_bar.showMessage(
+                "Eyedropper active — click on the preview to pick a color"
+            )
+        else:
+            self._btn_eyedropper.setStyleSheet("")
+            self._capture_preview.setCursor(Qt.CursorShape.ArrowCursor)
+            self._status_bar.showMessage("Ready")
+
+    def _preview_mouse_press(self, event: QMouseEvent) -> None:
+        """Handle mouse clicks on the capture preview for eyedropper."""
+        if not self._eyedropper_active:
+            return
+        if self._preview_original_pixmap is None:
+            return
+
+        # Map click position to the original (unscaled) pixmap coordinates
+        click_x = event.position().x()
+        click_y = event.position().y()
+
+        displayed = self._capture_preview.pixmap()
+        if displayed is None:
+            return
+
+        # Scale click to original pixmap coordinates
+        scale_x = self._preview_original_pixmap.width() / max(displayed.width(), 1)
+        scale_y = self._preview_original_pixmap.height() / max(displayed.height(), 1)
+        orig_x = int(click_x * scale_x)
+        orig_y = int(click_y * scale_y)
+
+        # Clamp to pixmap bounds
+        orig_x = max(0, min(orig_x, self._preview_original_pixmap.width() - 1))
+        orig_y = max(0, min(orig_y, self._preview_original_pixmap.height() - 1))
+
+        # Get the pixel color from the original pixmap
+        img = self._preview_original_pixmap.toImage()
+        pixel = img.pixelColor(orig_x, orig_y)
+        rgb = (pixel.red(), pixel.green(), pixel.blue())
+
+        self._set_box_color(rgb)
+
+        # Deactivate eyedropper
+        self._btn_eyedropper.setChecked(False)
+        self._on_eyedropper_toggled(False)
+        self._status_bar.showMessage(
+            f"Color picked: RGB({rgb[0]}, {rgb[1]}, {rgb[2]})"
+        )
+
+    def _set_box_color(self, rgb: tuple[int, int, int]) -> None:
+        """Set box search color and update UI + settings."""
+        self.settings.box_color = rgb
+        self._update_color_swatch(rgb)
+        self.box_color_changed.emit(rgb)
+
+    def _on_tolerance_changed(self, value: int) -> None:
+        self._lbl_tolerance.setText(str(value))
+        self.settings.box_color_tolerance = value
+        self.box_color_tolerance_changed.emit(value)
 
     # --- Public methods for app.py to call ---
 

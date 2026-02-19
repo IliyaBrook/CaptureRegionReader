@@ -76,6 +76,9 @@ class App:
         w.ocr_engine_changed.connect(self._ocr_worker.set_engine)
         w.tts_engine_changed.connect(self._tts_worker.set_engine)
         w.settle_time_changed.connect(self._text_differ.set_settle_time)
+        w.isolator_mode_changed.connect(self._ocr_worker.set_isolator_mode)
+        w.box_color_changed.connect(self._ocr_worker.set_box_color)
+        w.box_color_tolerance_changed.connect(self._ocr_worker.set_box_color_tolerance)
 
         # Engine unavailable errors — show dialog and revert combo box
         self._ocr_worker.engine_unavailable.connect(w.revert_ocr_engine)
@@ -90,6 +93,9 @@ class App:
         self._ocr_worker.set_language(s.language)
         self._ocr_worker.set_interval(s.ocr_interval_ms)
         self._ocr_worker.set_engine(s.ocr_engine)
+        self._ocr_worker.set_isolator_mode(s.isolator_mode)
+        self._ocr_worker.set_box_color(s.box_color)
+        self._ocr_worker.set_box_color_tolerance(s.box_color_tolerance)
         self._text_differ.set_settle_time(s.settle_time_ms)
         self._hotkey_manager.set_hotkey(s.hotkey)
         self._hotkey_manager.set_select_region_hotkey(s.select_region_hotkey)
@@ -143,7 +149,11 @@ class App:
 
                 if use_isolation:
                     # Tesseract: text_isolator → upscale
-                    isolated = isolate_text(raw_rgb)
+                    isolated = isolate_text(
+                        raw_rgb,
+                        config=self._ocr_worker._isolator_config,
+                        mode=self._ocr_worker._isolator_mode,
+                    )
                     if isolated is not None:
                         preview_img = _upscale(Image.fromarray(isolated))
                     else:
