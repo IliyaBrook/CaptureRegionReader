@@ -191,6 +191,9 @@ class MainWindow(QMainWindow):
         layout.addWidget(hotkey_group)
 
         # --- Language & OCR mode section ---
+        _COMBO_STYLE = "QComboBox { min-height: 14px; font-size: 13px;  }"
+        _FORM_LABEL_STYLE = "font-size: 13px;"
+
         lang_group = QGroupBox("Language && OCR Mode")
         lang_layout = QFormLayout(lang_group)
         lang_layout.setSpacing(8)
@@ -198,8 +201,10 @@ class MainWindow(QMainWindow):
         lang_layout.setFieldGrowthPolicy(
             QFormLayout.FieldGrowthPolicy.ExpandingFieldsGrow
         )
+        lang_layout.setLabelAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
 
         self._combo_lang = QComboBox()
+        self._combo_lang.setStyleSheet(_COMBO_STYLE)
         self._combo_lang.addItem("Auto (English + Russian)", "eng+rus")
         self._combo_lang.addItem("English", "eng")
         self._combo_lang.addItem("Russian", "rus")
@@ -208,9 +213,12 @@ class MainWindow(QMainWindow):
                 self._combo_lang.setCurrentIndex(i)
                 break
         self._combo_lang.currentIndexChanged.connect(self._on_lang_changed)
-        lang_layout.addRow("Language:", self._combo_lang)
+        _lbl_lang = QLabel("Language:")
+        _lbl_lang.setStyleSheet(_FORM_LABEL_STYLE)
+        lang_layout.addRow(_lbl_lang, self._combo_lang)
 
         self._combo_engine = QComboBox()
+        self._combo_engine.setStyleSheet(_COMBO_STYLE)
         self._combo_engine.addItem("Tesseract", "tesseract")
         self._combo_engine.addItem("EasyOCR (GPU)", "easyocr")
         for i in range(self._combo_engine.count()):
@@ -218,9 +226,12 @@ class MainWindow(QMainWindow):
                 self._combo_engine.setCurrentIndex(i)
                 break
         self._combo_engine.currentIndexChanged.connect(self._on_engine_changed)
-        lang_layout.addRow("OCR Engine:", self._combo_engine)
+        _lbl_engine = QLabel("OCR Engine:")
+        _lbl_engine.setStyleSheet(_FORM_LABEL_STYLE)
+        lang_layout.addRow(_lbl_engine, self._combo_engine)
 
         self._combo_tts = QComboBox()
+        self._combo_tts.setStyleSheet(_COMBO_STYLE)
         self._combo_tts.addItem("Piper (local, fast)", "piper")
         self._combo_tts.addItem("Edge-TTS (cloud, natural)", "edge-tts")
         for i in range(self._combo_tts.count()):
@@ -228,7 +239,9 @@ class MainWindow(QMainWindow):
                 self._combo_tts.setCurrentIndex(i)
                 break
         self._combo_tts.currentIndexChanged.connect(self._on_tts_engine_changed)
-        lang_layout.addRow("TTS Voice:", self._combo_tts)
+        _lbl_tts = QLabel("TTS Voice:")
+        _lbl_tts.setStyleSheet(_FORM_LABEL_STYLE)
+        lang_layout.addRow(_lbl_tts, self._combo_tts)
 
         layout.addWidget(lang_group)
 
