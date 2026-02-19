@@ -5,6 +5,7 @@ from PyQt6.QtGui import QIcon, QImage, QKeySequence, QPixmap
 from PyQt6.QtWidgets import (
     QCheckBox,
     QComboBox,
+    QFormLayout,
     QGroupBox,
     QHBoxLayout,
     QLabel,
@@ -100,6 +101,7 @@ class MainWindow(QMainWindow):
     select_region_hotkey_changed = pyqtSignal(str)
     interval_changed = pyqtSignal(int)
     ocr_engine_changed = pyqtSignal(str)
+    tts_engine_changed = pyqtSignal(str)
     settle_time_changed = pyqtSignal(int)
 
     def __init__(self, settings: AppSettings) -> None:
@@ -190,102 +192,105 @@ class MainWindow(QMainWindow):
 
         # --- Language & OCR mode section ---
         lang_group = QGroupBox("Language && OCR Mode")
-        lang_layout = QVBoxLayout(lang_group)
+        lang_layout = QFormLayout(lang_group)
+        lang_layout.setSpacing(8)
+        lang_layout.setContentsMargins(10, 16, 10, 10)
+        lang_layout.setFieldGrowthPolicy(
+            QFormLayout.FieldGrowthPolicy.ExpandingFieldsGrow
+        )
 
-        lang_row = QHBoxLayout()
-        lang_row.addWidget(QLabel("Language:"))
         self._combo_lang = QComboBox()
         self._combo_lang.addItem("Auto (English + Russian)", "eng+rus")
         self._combo_lang.addItem("English", "eng")
         self._combo_lang.addItem("Russian", "rus")
-
-        # Set current from settings
         for i in range(self._combo_lang.count()):
             if self._combo_lang.itemData(i) == settings.language:
                 self._combo_lang.setCurrentIndex(i)
                 break
-
         self._combo_lang.currentIndexChanged.connect(self._on_lang_changed)
-        lang_row.addWidget(self._combo_lang, stretch=1)
-        lang_layout.addLayout(lang_row)
+        lang_layout.addRow("Language:", self._combo_lang)
 
-        # OCR engine selector
-        engine_row = QHBoxLayout()
-        engine_row.addWidget(QLabel("OCR Engine:"))
         self._combo_engine = QComboBox()
         self._combo_engine.addItem("Tesseract", "tesseract")
         self._combo_engine.addItem("EasyOCR (GPU)", "easyocr")
-
         for i in range(self._combo_engine.count()):
             if self._combo_engine.itemData(i) == settings.ocr_engine:
                 self._combo_engine.setCurrentIndex(i)
                 break
-
         self._combo_engine.currentIndexChanged.connect(self._on_engine_changed)
-        engine_row.addWidget(self._combo_engine, stretch=1)
-        lang_layout.addLayout(engine_row)
+        lang_layout.addRow("OCR Engine:", self._combo_engine)
 
-        # Settle time slider
-        settle_row = QHBoxLayout()
-        settle_row.addWidget(QLabel("Settle time:"))
+        self._combo_tts = QComboBox()
+        self._combo_tts.addItem("Piper (local, fast)", "piper")
+        self._combo_tts.addItem("Edge-TTS (cloud, natural)", "edge-tts")
+        for i in range(self._combo_tts.count()):
+            if self._combo_tts.itemData(i) == settings.tts_engine:
+                self._combo_tts.setCurrentIndex(i)
+                break
+        self._combo_tts.currentIndexChanged.connect(self._on_tts_engine_changed)
+        lang_layout.addRow("TTS Voice:", self._combo_tts)
+
+        layout.addWidget(lang_group)
+
+        # --- Settings sliders ---
+        _SLIDER_LABEL_W = 80
+        _SLIDER_VALUE_W = 70
+
+        settings_group = QGroupBox("Settings")
+        settings_layout = QVBoxLayout(settings_group)
+        settings_layout.setSpacing(6)
+        settings_layout.setContentsMargins(10, 16, 10, 10)
+
+        def _make_slider_row(
+            label_text: str,
+            slider: QSlider,
+            value_label: QLabel,
+        ) -> QHBoxLayout:
+            row = QHBoxLayout()
+            lbl = QLabel(label_text)
+            lbl.setFixedWidth(_SLIDER_LABEL_W)
+            row.addWidget(lbl)
+            row.addWidget(slider, stretch=1)
+            value_label.setFixedWidth(_SLIDER_VALUE_W)
+            value_label.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+            row.addWidget(value_label)
+            return row
+
+        # Settle time
         self._slider_settle = QSlider(Qt.Orientation.Horizontal)
         self._slider_settle.setRange(0, 2000)
         self._slider_settle.setSingleStep(50)
         self._slider_settle.setValue(settings.settle_time_ms)
         self._slider_settle.valueChanged.connect(self._on_settle_changed)
-        settle_row.addWidget(self._slider_settle, stretch=1)
         self._lbl_settle = QLabel(f"{settings.settle_time_ms} ms")
-        self._lbl_settle.setMinimumWidth(60)
-        settle_row.addWidget(self._lbl_settle)
-        lang_layout.addLayout(settle_row)
+        settings_layout.addLayout(_make_slider_row("Settle time:", self._slider_settle, self._lbl_settle))
 
-        layout.addWidget(lang_group)
-
-        # --- Speech settings ---
-        speech_group = QGroupBox("Speech Settings")
-        speech_layout = QVBoxLayout(speech_group)
-
-        # Rate slider
-        rate_row = QHBoxLayout()
-        rate_row.addWidget(QLabel("Speed:"))
+        # Speed
         self._slider_rate = QSlider(Qt.Orientation.Horizontal)
         self._slider_rate.setRange(50, 350)
         self._slider_rate.setValue(settings.speech_rate)
         self._slider_rate.valueChanged.connect(self._on_rate_changed)
-        rate_row.addWidget(self._slider_rate, stretch=1)
         self._lbl_rate = QLabel(f"{settings.speech_rate} wpm")
-        self._lbl_rate.setMinimumWidth(70)
-        rate_row.addWidget(self._lbl_rate)
-        speech_layout.addLayout(rate_row)
+        settings_layout.addLayout(_make_slider_row("Speed:", self._slider_rate, self._lbl_rate))
 
-        # Volume slider
-        vol_row = QHBoxLayout()
-        vol_row.addWidget(QLabel("Volume:"))
+        # Volume
         self._slider_volume = QSlider(Qt.Orientation.Horizontal)
         self._slider_volume.setRange(0, 100)
         self._slider_volume.setValue(int(settings.volume * 100))
         self._slider_volume.valueChanged.connect(self._on_volume_changed)
-        vol_row.addWidget(self._slider_volume, stretch=1)
         self._lbl_volume = QLabel(f"{int(settings.volume * 100)}%")
-        self._lbl_volume.setMinimumWidth(50)
-        vol_row.addWidget(self._lbl_volume)
-        speech_layout.addLayout(vol_row)
+        settings_layout.addLayout(_make_slider_row("Volume:", self._slider_volume, self._lbl_volume))
 
         # OCR interval
-        interval_row = QHBoxLayout()
-        interval_row.addWidget(QLabel("OCR interval:"))
         self._slider_interval = QSlider(Qt.Orientation.Horizontal)
         self._slider_interval.setRange(200, 3000)
         self._slider_interval.setSingleStep(100)
         self._slider_interval.setValue(settings.ocr_interval_ms)
         self._slider_interval.valueChanged.connect(self._on_interval_changed)
-        interval_row.addWidget(self._slider_interval, stretch=1)
         self._lbl_interval = QLabel(f"{settings.ocr_interval_ms} ms")
-        self._lbl_interval.setMinimumWidth(60)
-        interval_row.addWidget(self._lbl_interval)
-        speech_layout.addLayout(interval_row)
+        settings_layout.addLayout(_make_slider_row("OCR interval:", self._slider_interval, self._lbl_interval))
 
-        layout.addWidget(speech_group)
+        layout.addWidget(settings_group)
 
         # --- Text display ---
         text_group = QGroupBox("Recognized Text")
@@ -366,6 +371,11 @@ class MainWindow(QMainWindow):
         engine = self._combo_engine.itemData(index)
         self.settings.ocr_engine = engine
         self.ocr_engine_changed.emit(engine)
+
+    def _on_tts_engine_changed(self, index: int) -> None:
+        engine = self._combo_tts.itemData(index)
+        self.settings.tts_engine = engine
+        self.tts_engine_changed.emit(engine)
 
     def _on_settle_changed(self, value: int) -> None:
         self._lbl_settle.setText(f"{value} ms")

@@ -74,10 +74,12 @@ class App:
         w.select_region_hotkey_changed.connect(self._hotkey_manager.set_select_region_hotkey)
         w.interval_changed.connect(self._ocr_worker.set_interval)
         w.ocr_engine_changed.connect(self._ocr_worker.set_engine)
+        w.tts_engine_changed.connect(self._tts_worker.set_engine)
         w.settle_time_changed.connect(self._text_differ.set_settle_time)
 
     def _apply_settings(self) -> None:
         s = self._settings
+        self._tts_worker.set_engine(s.tts_engine)
         self._tts_worker.set_rate(s.speech_rate)
         self._tts_worker.set_volume(s.volume)
         self._tts_worker.set_language(s.language)

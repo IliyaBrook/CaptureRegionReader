@@ -12,6 +12,7 @@ dependencies = [
     "numpy>=1.26",
     "opencv-python-headless>=4.8",
     "edge-tts>=7.2.7",
+    "piper-tts>=1.2.0",
 ]
 
 [project.optional-dependencies]
