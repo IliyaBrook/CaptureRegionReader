@@ -511,11 +511,11 @@ class MainWindow(QMainWindow):
 
         QMessageBox.warning(
             self,
-            "Движок OCR недоступен",
-            f"Не удалось загрузить движок <b>{display_name}</b>.\n\n"
-            f"Ошибка: {error_msg}\n\n"
-            f"Установите необходимые пакеты или выберите другой движок.\n\n"
-            f"Для EasyOCR:\n"
+            "OCR Engine Unavailable",
+            f"Failed to load <b>{display_name}</b> engine.\n\n"
+            f"Error: {error_msg}\n\n"
+            f"Install the required packages or choose a different engine.\n\n"
+            f"For EasyOCR:\n"
             f"  uv pip install easyocr torch",
         )
 
@@ -541,12 +541,12 @@ class MainWindow(QMainWindow):
 
         QMessageBox.warning(
             self,
-            "Голосовой движок недоступен",
-            f"Не удалось загрузить движок <b>{display_name}</b>.\n\n"
-            f"Ошибка: {error_msg}\n\n"
-            f"Установите необходимые пакеты или выберите другой движок.\n\n"
-            f"Для Silero TTS (локальный, GPU):\n"
+            "TTS Engine Unavailable",
+            f"Failed to load <b>{display_name}</b> engine.\n\n"
+            f"Error: {error_msg}\n\n"
+            f"Install the required packages or choose a different engine.\n\n"
+            f"For Silero TTS (local, GPU):\n"
             f"  uv pip install torch\n\n"
-            f"Для Edge-TTS (облачный):\n"
+            f"For Edge-TTS (cloud):\n"
             f"  uv pip install edge-tts",
         )
