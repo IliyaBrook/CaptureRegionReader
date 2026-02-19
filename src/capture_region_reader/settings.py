@@ -13,6 +13,8 @@ class AppSettings:
     speech_rate: int = 150
     volume: float = 1.0
     ocr_interval_ms: int = 500
+    ocr_engine: str = "tesseract"  # "tesseract" | "easyocr"
+    settle_time_ms: int = 300      # 0-2000ms, text stabilization delay
 
     def save(self) -> None:
         s = QSettings("CaptureRegionReader", "CaptureRegionReader")
@@ -29,6 +31,8 @@ class AppSettings:
         s.setValue("speech_rate", self.speech_rate)
         s.setValue("volume", self.volume)
         s.setValue("ocr_interval_ms", self.ocr_interval_ms)
+        s.setValue("ocr_engine", self.ocr_engine)
+        s.setValue("settle_time_ms", self.settle_time_ms)
 
     @classmethod
     def load(cls) -> AppSettings:
@@ -49,4 +53,6 @@ class AppSettings:
             speech_rate=int(s.value("speech_rate", 150)),
             volume=float(s.value("volume", 1.0)),
             ocr_interval_ms=int(s.value("ocr_interval_ms", 500)),
+            ocr_engine=str(s.value("ocr_engine", "tesseract")),
+            settle_time_ms=int(s.value("settle_time_ms", 300)),
         )

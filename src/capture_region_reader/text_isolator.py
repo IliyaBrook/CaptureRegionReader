@@ -1,11 +1,12 @@
 """Isolate subtitle text from a screenshot before OCR.
 
-Simple approach:
-1. Find character-like contours (brightness-filtered)
+Pipeline:
+1. Find character-like contours (brightness-filtered) on raw grayscale
 2. Cluster into horizontal text lines
 3. Score lines and pick the best subtitle block
 4. Crop tightly around the text
-5. Threshold by text color: if text is bright → darken everything
+5. HDR-adaptive enhancement on the cropped region (if needed)
+6. Threshold by text color: if text is bright → darken everything
    that isn't bright (background), invert to black-on-white.
    No contour masks — just a global brightness threshold on the
    cropped region. This preserves letter interiors (о, е, а, д).
@@ -19,6 +20,55 @@ import numpy as np
 
 # (bounding_box, mean_brightness)
 CharBox = tuple[tuple[int, int, int, int], float]
+
+
+def _preprocess_adaptive(rgb: np.ndarray) -> np.ndarray:
+    """HDR-adaptive preprocessing for EasyOCR path.
+
+    Analyzes image brightness/contrast and applies enhanced processing
+    when the image has low contrast, extreme brightness, or HDR artifacts
+    (common with game screenshots, semi-transparent overlays, etc.).
+
+    NOTE: This function is used by EasyOCR (which has its own text detector)
+    and as a post-crop enhancement in the Tesseract pipeline.  It must NOT
+    be used before _find_char_boxes() because CLAHE redistributes brightness
+    values and breaks the hardcoded brightness thresholds (160/100).
+
+    Returns a grayscale image.
+    """
+    gray = cv2.cvtColor(rgb, cv2.COLOR_RGB2GRAY)
+    return _enhance_gray(gray)
+
+
+def _enhance_gray(gray: np.ndarray) -> np.ndarray:
+    """Apply HDR-adaptive enhancement to a grayscale image.
+
+    Used on cropped regions (after contour detection) to improve
+    Otsu thresholding on difficult backgrounds.
+    """
+    mean_br = float(np.mean(gray))
+    std_br = float(np.std(gray))
+
+    # Auto-detect when enhanced processing is needed:
+    # - Low contrast (std < 40): HDR tone-mapped, flat images
+    # - Very bright (mean > 200): washed-out, light backgrounds
+    # - Very dark (mean < 55): dark game scenes with dim subtitles
+    needs_enhanced = std_br < 40 or mean_br > 200 or mean_br < 55
+
+    if needs_enhanced:
+        # CLAHE: adaptive histogram equalization — boosts local contrast
+        # in tile regions without over-amplifying noise globally.
+        clahe = cv2.createCLAHE(clipLimit=2.5, tileGridSize=(8, 8))
+        enhanced = clahe.apply(gray)
+
+        # Bilateral filter: reduces noise while preserving text edges.
+        denoised = cv2.bilateralFilter(enhanced, 5, 50, 50)
+
+        # Sharpening: 3x3 unsharp mask to make text edges crisper.
+        kernel = np.array([[-1, -1, -1], [-1, 9, -1], [-1, -1, -1]])
+        gray = cv2.filter2D(denoised, -1, kernel=kernel)
+
+    return gray
 
 
 def _is_blank_frame(gray: np.ndarray) -> bool:
@@ -349,6 +399,9 @@ def isolate_text(rgb: np.ndarray) -> np.ndarray | None:
     if h < 10 or w < 10:
         return None
 
+    # Use RAW grayscale for contour detection — brightness thresholds in
+    # _find_char_boxes() are calibrated for unprocessed pixel values.
+    # CLAHE/HDR enhancement is applied later, only on the cropped region.
     gray = cv2.cvtColor(rgb, cv2.COLOR_RGB2GRAY)
 
     # Early rejection: blank/uniform frames produce noise under Otsu
@@ -390,7 +443,13 @@ def isolate_text(rgb: np.ndarray) -> np.ndarray | None:
 
     cropped = gray[cy1:cy2, cx1:cx2]
 
-    # Step 5: simple brightness threshold — no contour masks!
+    # Step 5: HDR-adaptive enhancement on the cropped region.
+    # CLAHE is safe here because we already found char boxes using raw values.
+    # It improves Otsu thresholding on difficult backgrounds (low contrast,
+    # semi-transparent overlays, HDR game scenes).
+    cropped = _enhance_gray(cropped)
+
+    # Step 6: simple brightness threshold — no contour masks!
     #
     # Determine the text brightness from the detected chars.
     # Then threshold: keep only pixels near text brightness,

@@ -73,6 +73,8 @@ class App:
         w.hotkey_changed.connect(self._hotkey_manager.set_hotkey)
         w.select_region_hotkey_changed.connect(self._hotkey_manager.set_select_region_hotkey)
         w.interval_changed.connect(self._ocr_worker.set_interval)
+        w.ocr_engine_changed.connect(self._ocr_worker.set_engine)
+        w.settle_time_changed.connect(self._text_differ.set_settle_time)
 
     def _apply_settings(self) -> None:
         s = self._settings
@@ -81,6 +83,8 @@ class App:
         self._tts_worker.set_language(s.language)
         self._ocr_worker.set_language(s.language)
         self._ocr_worker.set_interval(s.ocr_interval_ms)
+        self._ocr_worker.set_engine(s.ocr_engine)
+        self._text_differ.set_settle_time(s.settle_time_ms)
         self._hotkey_manager.set_hotkey(s.hotkey)
         self._hotkey_manager.set_select_region_hotkey(s.select_region_hotkey)
 
@@ -114,11 +118,11 @@ class App:
     def _grab_single_preview(self, left: int, top: int, width: int, height: int) -> None:
         """Capture a single frame for the preview right after region selection.
 
-        Shows the processed (isolated) image so user can see what Tesseract
+        Shows the processed image so user can see what the OCR engine
         will receive — useful for debugging text detection.
         """
         from capture_region_reader.text_isolator import isolate_text
-        from capture_region_reader.ocr_worker import _upscale
+        from capture_region_reader.ocr_worker import _upscale, _preprocess_for_easyocr
         from PIL import Image
 
         try:
@@ -128,12 +132,20 @@ class App:
                 img_array = np.array(screenshot, dtype=np.uint8)
                 raw_rgb = img_array[:, :, :3][:, :, ::-1].copy()
 
-                # Apply text isolation (same as OCR pipeline)
-                isolated = isolate_text(raw_rgb)
-                if isolated is not None:
-                    preview_img = _upscale(Image.fromarray(isolated))
+                use_isolation = getattr(
+                    self._ocr_worker._engine, "needs_text_isolation", True
+                )
+
+                if use_isolation:
+                    # Tesseract: text_isolator → upscale
+                    isolated = isolate_text(raw_rgb)
+                    if isolated is not None:
+                        preview_img = _upscale(Image.fromarray(isolated))
+                    else:
+                        preview_img = Image.fromarray(raw_rgb)
                 else:
-                    preview_img = Image.fromarray(raw_rgb)
+                    # EasyOCR: HDR enhancement → upscale (RST approach)
+                    preview_img = _preprocess_for_easyocr(raw_rgb)
 
                 preview_rgb = np.array(preview_img)
                 p_h, p_w = preview_rgb.shape[:2]

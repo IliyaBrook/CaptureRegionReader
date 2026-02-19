@@ -99,6 +99,8 @@ class MainWindow(QMainWindow):
     hotkey_changed = pyqtSignal(str)
     select_region_hotkey_changed = pyqtSignal(str)
     interval_changed = pyqtSignal(int)
+    ocr_engine_changed = pyqtSignal(str)
+    settle_time_changed = pyqtSignal(int)
 
     def __init__(self, settings: AppSettings) -> None:
         super().__init__()
@@ -206,6 +208,36 @@ class MainWindow(QMainWindow):
         self._combo_lang.currentIndexChanged.connect(self._on_lang_changed)
         lang_row.addWidget(self._combo_lang, stretch=1)
         lang_layout.addLayout(lang_row)
+
+        # OCR engine selector
+        engine_row = QHBoxLayout()
+        engine_row.addWidget(QLabel("OCR Engine:"))
+        self._combo_engine = QComboBox()
+        self._combo_engine.addItem("Tesseract", "tesseract")
+        self._combo_engine.addItem("EasyOCR (GPU)", "easyocr")
+
+        for i in range(self._combo_engine.count()):
+            if self._combo_engine.itemData(i) == settings.ocr_engine:
+                self._combo_engine.setCurrentIndex(i)
+                break
+
+        self._combo_engine.currentIndexChanged.connect(self._on_engine_changed)
+        engine_row.addWidget(self._combo_engine, stretch=1)
+        lang_layout.addLayout(engine_row)
+
+        # Settle time slider
+        settle_row = QHBoxLayout()
+        settle_row.addWidget(QLabel("Settle time:"))
+        self._slider_settle = QSlider(Qt.Orientation.Horizontal)
+        self._slider_settle.setRange(0, 2000)
+        self._slider_settle.setSingleStep(50)
+        self._slider_settle.setValue(settings.settle_time_ms)
+        self._slider_settle.valueChanged.connect(self._on_settle_changed)
+        settle_row.addWidget(self._slider_settle, stretch=1)
+        self._lbl_settle = QLabel(f"{settings.settle_time_ms} ms")
+        self._lbl_settle.setMinimumWidth(60)
+        settle_row.addWidget(self._lbl_settle)
+        lang_layout.addLayout(settle_row)
 
         layout.addWidget(lang_group)
 
@@ -329,6 +361,16 @@ class MainWindow(QMainWindow):
         lang = self._combo_lang.itemData(index)
         self.settings.language = lang
         self.language_changed.emit(lang)
+
+    def _on_engine_changed(self, index: int) -> None:
+        engine = self._combo_engine.itemData(index)
+        self.settings.ocr_engine = engine
+        self.ocr_engine_changed.emit(engine)
+
+    def _on_settle_changed(self, value: int) -> None:
+        self._lbl_settle.setText(f"{value} ms")
+        self.settings.settle_time_ms = value
+        self.settle_time_changed.emit(value)
 
     def _on_rate_changed(self, value: int) -> None:
         self._lbl_rate.setText(f"{value} wpm")

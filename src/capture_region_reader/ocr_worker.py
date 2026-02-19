@@ -1,34 +1,106 @@
 from __future__ import annotations
 
 import os
+import re
 import time
+from typing import Protocol
+
 import numpy as np
 import pytesseract
-from difflib import SequenceMatcher
 from mss import mss
 from PIL import Image
 from PyQt6.QtCore import QThread, pyqtSignal
 
+from capture_region_reader.text_differ import is_text_similar
 from capture_region_reader.text_isolator import isolate_text
 
 
-# Minimum dimensions for good Tesseract accuracy
+# Minimum dimensions for good OCR accuracy (Tesseract path)
 MIN_WIDTH = 600
 MIN_HEIGHT = 100
+
+# Minimum dimensions for EasyOCR (from RSTGameTranslation)
+EASYOCR_MIN_WIDTH = 1024
+EASYOCR_MIN_HEIGHT = 768
 
 # Debug: save captures to .tests/debug/ for inspection
 DEBUG_SAVE = os.environ.get("CRR_DEBUG", "0") == "1"
 _DEBUG_DIR = os.path.join(os.path.dirname(__file__), "..", "..", ".tests", "debug")
 
 
-def _extract_real_words(text: str) -> list[str]:
-    """Extract plausible real words from OCR text, ignoring garbage.
+# --- OCR engine abstraction ---
 
-    A "real word" is ≥3 characters and predominantly alphabetic
-    (Cyrillic or Latin).  This filters out noise tokens like
-    'ФМ/ЮРГОМЕМС', '01зпеу', '|', 'Р\\м$' that come from
-    background elements being OCR'd.
+class OcrEngine(Protocol):
+    """Protocol for OCR engines."""
+    def recognize(self, image: Image.Image, language: str) -> str: ...
+
+
+class TesseractEngine:
+    """Tesseract OCR engine (default, lightweight)."""
+
+    def recognize(self, image: Image.Image, language: str) -> str:
+        return pytesseract.image_to_string(
+            image, lang=language, config="--psm 6 --oem 1"
+        ).strip()
+
+
+class EasyOcrEngine:
+    """EasyOCR engine with GPU support (optional, requires easyocr package).
+
+    EasyOCR has its own text detection model so it works best with
+    the original (non-binarized) image.  We apply HDR-adaptive preprocessing
+    (CLAHE + bilateral + sharpening) but skip the text_isolator pipeline.
     """
+
+    # EasyOCR works on raw images, not binarized text_isolator output
+    needs_text_isolation = False
+
+    _LANG_MAP = {
+        "eng": ["en"],
+        "rus": ["ru"],
+        "eng+rus": ["en", "ru"],
+    }
+
+    def __init__(self) -> None:
+        self._reader = None
+        self._current_langs: list[str] | None = None
+
+    def recognize(self, image: Image.Image, language: str) -> str:
+        langs = self._LANG_MAP.get(language, [language])
+
+        if self._reader is None or self._current_langs != langs:
+            import easyocr
+            import torch
+
+            gpu = torch.cuda.is_available()
+            print(f"[EasyOCR] Initializing with langs={langs}, gpu={gpu}")
+            self._reader = easyocr.Reader(langs, gpu=gpu)
+            self._current_langs = langs
+
+        img_array = np.array(image)
+        results = self._reader.readtext(img_array, detail=0)
+        return "\n".join(results).strip()
+
+
+def create_engine(name: str) -> OcrEngine:
+    """Create an OCR engine by name. Raises ImportError for unavailable engines."""
+    if name == "easyocr":
+        # Verify easyocr is importable before creating the engine
+        try:
+            import easyocr  # noqa: F401
+        except ImportError:
+            raise ImportError(
+                "EasyOCR is not installed. Install with: "
+                "uv pip install easyocr torch"
+            )
+        return EasyOcrEngine()
+    return TesseractEngine()
+
+
+# --- Helper functions ---
+
+def _extract_real_words(text: str) -> list[str]:
+    """Extract plausible real words from OCR text, ignoring garbage."""
     words = []
     for w in text.split():
         if len(w) < 3:
@@ -41,10 +113,7 @@ def _extract_real_words(text: str) -> list[str]:
 
 def _strip_ocr_artifacts(text: str) -> str:
     """Remove common OCR cursor/boundary artifacts for comparison."""
-    import re
-    # Remove trailing artifacts: |, ], [, ), \, trailing punctuation junk
     text = re.sub(r"[\|\]\[\)\\\}]+\s*$", "", text)
-    # Also remove mid-text stray | ] [ chars
     text = re.sub(r"[\|\]\[]", "", text)
     return text.strip()
 
@@ -52,15 +121,7 @@ def _strip_ocr_artifacts(text: str) -> str:
 def _texts_similar(
     new_text: str, last_emitted: str, threshold: float = 0.75
 ) -> bool:
-    """Check if *new_text* is similar enough to *last_emitted* to skip.
-
-    Returns True  → "same subtitle, don't emit again"
-    Returns False → "different or grew, let it through"
-
-    Important asymmetry for typewriter-style subtitles:
-      - last_emitted is a prefix of new_text → text GREW → False
-      - new_text is a subset of last_emitted → partial OCR → True (skip)
-    """
+    """Check if *new_text* is similar enough to *last_emitted* to skip."""
     if not new_text or not last_emitted:
         return False
     norm_new = " ".join(new_text.split())
@@ -68,21 +129,14 @@ def _texts_similar(
     if norm_new == norm_old:
         return True
 
-    # Strip OCR artifacts (|, ], etc.) for containment checks —
-    # typewriter subtitles have a blinking cursor that OCR reads as |/]/etc.
     clean_new = _strip_ocr_artifacts(norm_new)
     clean_old = _strip_ocr_artifacts(norm_old)
 
-    # new is a subset of old → partial OCR of same subtitle → skip
     if clean_new in clean_old:
         return True
-
-    # old is a subset of new → text GREW (typewriter subtitles) → let through
     if clean_old in clean_new:
         return False
 
-    # Word-level growth detection: handles OCR jitter within words
-    # (e.g., "ВВЕАКЕН" vs "ВНЕАКЕН") while still detecting growth.
     words_new = _extract_real_words(new_text)
     words_old = _extract_real_words(last_emitted)
     if len(words_new) >= 2 and len(words_old) >= 2:
@@ -92,27 +146,18 @@ def _texts_similar(
         smaller = min(len(set_new), len(set_old))
 
         if overlap / smaller >= 0.6:
-            # Most old words are in new — check if new has MORE words
             if len(set_new) > len(set_old):
-                # Text grew — let through for TextDiffer to handle
                 return False
             return True
 
-    # Full-text similarity (catch OCR jitter with same word count)
-    if SequenceMatcher(None, norm_old, norm_new).ratio() >= threshold:
+    if is_text_similar(norm_old, norm_new, threshold):
         return True
 
     return False
 
 
 def _filter_ocr_garbage(text: str) -> str:
-    """Filter out OCR garbage lines.
-
-    Removes lines that are likely misrecognized noise:
-    - Lines with too few alphanumeric characters
-    - Lines where single words mix Cyrillic and Latin (OCR confusion)
-    - Lines that are mostly digits and punctuation
-    """
+    """Filter out OCR garbage lines."""
     lines = text.split("\n")
     good_lines = []
 
@@ -121,18 +166,15 @@ def _filter_ocr_garbage(text: str) -> str:
         if not line:
             continue
 
-        # Basic quality: must have enough alphanumeric chars
         alnum = sum(1 for c in line if c.isalnum())
         non_space = len(line.replace(" ", ""))
         if non_space == 0 or alnum / non_space < 0.4:
             continue
 
-        # Must have at least 2 alphabetic chars
         alpha = sum(1 for c in line if c.isalpha())
         if alpha < 2:
             continue
 
-        # Check for mixed-script words (strong signal of OCR garbage)
         words = line.split()
         garbage_words = 0
         for word in words:
@@ -145,15 +187,11 @@ def _filter_ocr_garbage(text: str) -> str:
         if len(words) > 0 and garbage_words / len(words) > 0.3:
             continue
 
-        # Reject lines dominated by short words (1-2 chars).
-        # Garbage like "ООО ООО О Ооо бо И О" is mostly tiny words.
         if len(words) >= 3:
             short_words = sum(1 for w in words if len(w) <= 2)
             if short_words / len(words) > 0.6:
                 continue
 
-        # Reject lines with very low character diversity.
-        # "ООО ООО О Ооо" has few unique chars relative to length.
         alpha_chars = [c.lower() for c in line if c.isalpha()]
         if len(alpha_chars) >= 4:
             unique_ratio = len(set(alpha_chars)) / len(alpha_chars)
@@ -164,7 +202,6 @@ def _filter_ocr_garbage(text: str) -> str:
 
     result = "\n".join(good_lines)
 
-    # Final: reject very short results with tiny average word length.
     if result:
         all_words = result.split()
         if len(all_words) <= 3:
@@ -176,7 +213,7 @@ def _filter_ocr_garbage(text: str) -> str:
 
 
 def _upscale(img: Image.Image) -> Image.Image:
-    """Upscale image to minimum dimensions needed for Tesseract accuracy."""
+    """Upscale image to minimum dimensions needed for Tesseract OCR accuracy."""
     w, h = img.size
     scale = 1
     if w < MIN_WIDTH:
@@ -187,6 +224,56 @@ def _upscale(img: Image.Image) -> Image.Image:
     scale = min(scale, 4)
     if scale > 1:
         img = img.resize((w * scale, h * scale), Image.Resampling.LANCZOS)
+    return img
+
+
+def _preprocess_for_easyocr(raw_rgb: np.ndarray) -> Image.Image:
+    """Preprocess image for EasyOCR following RSTGameTranslation approach.
+
+    Pipeline (from RST's process_image_easyocr.py):
+    1. HDR-adaptive enhancement (CLAHE + bilateral + sharpen) on grayscale
+       OR basic contrast + median filter
+    2. Convert back to RGB (EasyOCR accepts both but RGB is standard)
+    3. Upscale to minimum 1024×768 with LANCZOS
+
+    No text isolation or contour detection — EasyOCR has its own
+    CRAFT text detector that works best on natural/enhanced images.
+    """
+    import cv2
+    from PIL import ImageEnhance, ImageFilter
+
+    gray = cv2.cvtColor(raw_rgb, cv2.COLOR_RGB2GRAY)
+    mean_br = float(np.mean(gray))
+    std_br = float(np.std(gray))
+
+    # Auto-detect when enhanced processing is needed (same thresholds as RST)
+    needs_enhanced = std_br < 40 or mean_br > 200 or mean_br < 55
+
+    if needs_enhanced:
+        # Enhanced mode: CLAHE + bilateral + sharpen (RST parameters)
+        clahe = cv2.createCLAHE(clipLimit=2.5, tileGridSize=(8, 8))
+        enhanced = clahe.apply(gray)
+        denoised = cv2.bilateralFilter(enhanced, 5, 50, 50)
+        kernel = np.array([[-1, -1, -1], [-1, 9, -1], [-1, -1, -1]])
+        sharpened = cv2.filter2D(denoised, -1, kernel=kernel)
+        # Convert gray back to RGB for EasyOCR
+        result_rgb = cv2.cvtColor(sharpened, cv2.COLOR_GRAY2RGB)
+        img = Image.fromarray(result_rgb)
+    else:
+        # Basic mode: contrast boost + median filter (RST parameters)
+        img = Image.fromarray(raw_rgb).convert("L")
+        img = ImageEnhance.Contrast(img).enhance(2.0)
+        img = img.filter(ImageFilter.MedianFilter(size=3))
+        img = img.convert("RGB")
+
+    # Upscale to EasyOCR minimum dimensions (RST uses 1024×768)
+    w, h = img.size
+    if w < EASYOCR_MIN_WIDTH or h < EASYOCR_MIN_HEIGHT:
+        scale = max(EASYOCR_MIN_WIDTH / w, EASYOCR_MIN_HEIGHT / h)
+        new_w = int(w * scale)
+        new_h = int(h * scale)
+        img = img.resize((new_w, new_h), Image.Resampling.LANCZOS)
+
     return img
 
 
@@ -203,8 +290,10 @@ class OcrWorker(QThread):
         self._running: bool = False
         self._capture_count: int = 0
         self._last_emitted_text: str = ""
-        self._growth_detected: bool = False  # True when growth was recently seen
-        self._stable_emits: int = 0          # count of stable emits after growth
+        self._growth_detected: bool = False
+        self._stable_emits: int = 0
+        self._engine: OcrEngine = TesseractEngine()
+        self._engine_name: str = "tesseract"
 
     def configure(
         self,
@@ -220,13 +309,25 @@ class OcrWorker(QThread):
         self._growth_detected = False
         self._stable_emits = 0
         print(f"[OCR] Configured region: left={region[0]}, top={region[1]}, "
-              f"width={region[2]}, height={region[3]}, lang={language}")
+              f"width={region[2]}, height={region[3]}, lang={language}, "
+              f"engine={self._engine_name}")
 
     def set_language(self, language: str) -> None:
         self._language = language
 
     def set_interval(self, interval_ms: int) -> None:
         self._interval_ms = interval_ms
+
+    def set_engine(self, engine_name: str) -> None:
+        """Switch OCR engine. Safe to call while running."""
+        if engine_name == self._engine_name:
+            return
+        try:
+            self._engine = create_engine(engine_name)
+            self._engine_name = engine_name
+            print(f"[OCR] Switched to engine: {engine_name}")
+        except ImportError as e:
+            self.error_occurred.emit(str(e))
 
     def run(self) -> None:
         self._running = True
@@ -248,28 +349,36 @@ class OcrWorker(QThread):
                     screenshot = sct.grab(monitor)
                     img_array = np.array(screenshot, dtype=np.uint8)
 
-                    # BGRA → RGB
+                    # BGRA -> RGB
                     raw_rgb = img_array[:, :, :3][:, :, ::-1].copy()
 
-                    # Text isolation: detect text contours, crop, clean bg
-                    isolated = isolate_text(raw_rgb)
+                    # Choose preprocessing path based on engine
+                    use_isolation = getattr(self._engine, "needs_text_isolation", True)
 
-                    if isolated is None:
-                        # No text detected — show raw frame in preview, skip OCR
-                        p_h, p_w = raw_rgb.shape[:2]
-                        self.frame_captured.emit(raw_rgb.tobytes(), p_w, p_h)
-                        # If growth was recently detected, notify TextDiffer
-                        # that text disappeared so it can flush pending buffer
-                        if self._growth_detected:
-                            self.text_recognized.emit("")
-                            self._growth_detected = False
-                            self._stable_emits = 0
-                        self.msleep(self._interval_ms)
-                        continue
+                    if use_isolation:
+                        # Tesseract path: text_isolator creates clean
+                        # black-on-white image optimized for Tesseract
+                        isolated = isolate_text(raw_rgb)
 
-                    ocr_img = _upscale(Image.fromarray(isolated))
+                        if isolated is None:
+                            p_h, p_w = raw_rgb.shape[:2]
+                            self.frame_captured.emit(raw_rgb.tobytes(), p_w, p_h)
+                            if self._growth_detected:
+                                self.text_recognized.emit("")
+                                self._growth_detected = False
+                                self._stable_emits = 0
+                            self.msleep(self._interval_ms)
+                            continue
 
-                    # Send the processed image to preview so user can debug
+                        ocr_img = _upscale(Image.fromarray(isolated))
+                    else:
+                        # EasyOCR path (matches RSTGameTranslation approach):
+                        # HDR-adaptive preprocessing on raw image, then
+                        # upscale to min 1024x768.  EasyOCR has its own
+                        # CRAFT text detector — no text_isolator needed.
+                        ocr_img = _preprocess_for_easyocr(raw_rgb)
+
+                    # Send the processed image to preview
                     preview_rgb = np.array(ocr_img)
                     p_h, p_w = preview_rgb.shape[:2]
                     self.frame_captured.emit(preview_rgb.tobytes(), p_w, p_h)
@@ -283,48 +392,37 @@ class OcrWorker(QThread):
                         ocr_img.save(
                             os.path.join(_DEBUG_DIR, f"crr_isolated_{self._capture_count}.png")
                         )
-                        print(
-                            f"[OCR] Saved debug captures #{self._capture_count}"
-                        )
+                        print(f"[OCR] Saved debug captures #{self._capture_count}")
 
                     self._capture_count += 1
 
-                    # PSM 6 = uniform text block (isolated text is a clean block)
-                    # OEM 1 = legacy engine (consistent)
+                    # Run OCR via the configured engine
                     t0 = time.monotonic()
-                    text = pytesseract.image_to_string(
-                        ocr_img,
-                        lang=self._language,
-                        config="--psm 6 --oem 1",
-                    ).strip()
+                    text = self._engine.recognize(ocr_img, self._language)
                     ocr_ms = int((time.monotonic() - t0) * 1000)
 
-                    print(f"[OCR] ({ocr_ms}ms) Tesseract raw: {repr(text[:200] if text else '')}")
+                    print(f"[OCR] ({ocr_ms}ms) {self._engine_name} raw: "
+                          f"{repr(text[:200] if text else '')}")
 
                     # Filter out garbage and deduplicate
                     if text:
                         filtered = _filter_ocr_garbage(text)
                         if filtered != text:
-                            print(f"[OCR] After filter: {repr(filtered[:200] if filtered else '<empty>')}")
+                            print(f"[OCR] After filter: "
+                                  f"{repr(filtered[:200] if filtered else '<empty>')}")
                         text = filtered
                         if text:
                             similar = _texts_similar(text, self._last_emitted_text)
                             if similar and not self._growth_detected:
-                                # Same subtitle, no pending growth — skip
                                 print(f"[OCR] Dedup: similar to last")
                             elif similar and self._growth_detected:
-                                # Text stabilized after growth — emit for
-                                # TextDiffer stability counting, then stop
                                 self._stable_emits += 1
                                 print(f"[OCR] Emit for stability ({self._stable_emits}/3)")
                                 self.text_recognized.emit(text)
                                 if self._stable_emits >= 2:
-                                    # Enough stable emits, TextDiffer
-                                    # should have flushed by now
                                     self._growth_detected = False
                                     self._stable_emits = 0
                             else:
-                                # Different text — detect growth
                                 clean_new = _strip_ocr_artifacts(text)
                                 clean_old = _strip_ocr_artifacts(
                                     self._last_emitted_text
@@ -335,7 +433,6 @@ class OcrWorker(QThread):
                                     and len(clean_new) > len(clean_old) + 3
                                 )
                                 if not is_growth:
-                                    # Also check word-level growth
                                     words_old = _extract_real_words(
                                         self._last_emitted_text
                                     )
@@ -356,7 +453,6 @@ class OcrWorker(QThread):
                                     self._growth_detected = True
                                     self._stable_emits = 0
                                 else:
-                                    # Completely new subtitle
                                     self._growth_detected = False
                                     self._stable_emits = 0
                                 self._last_emitted_text = text
