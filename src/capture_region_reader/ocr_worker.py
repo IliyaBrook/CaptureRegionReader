@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import numpy as np
 import pytesseract
+from difflib import SequenceMatcher
 from mss import mss
 from PIL import Image
 from PyQt6.QtCore import QThread, pyqtSignal
@@ -14,8 +15,67 @@ from capture_region_reader.text_isolator import isolate_text
 MIN_WIDTH = 600
 MIN_HEIGHT = 100
 
-# Debug: save captures to /tmp for inspection
+# Debug: save captures to .tests/debug/ for inspection
 DEBUG_SAVE = os.environ.get("CRR_DEBUG", "0") == "1"
+_DEBUG_DIR = os.path.join(os.path.dirname(__file__), "..", "..", ".tests", "debug")
+
+
+def _extract_real_words(text: str) -> list[str]:
+    """Extract plausible real words from OCR text, ignoring garbage.
+
+    A "real word" is ≥3 characters and predominantly alphabetic
+    (Cyrillic or Latin).  This filters out noise tokens like
+    'ФМ/ЮРГОМЕМС', '01зпеу', '|', 'Р\\м$' that come from
+    background elements being OCR'd.
+    """
+    words = []
+    for w in text.split():
+        if len(w) < 3:
+            continue
+        alpha = sum(1 for c in w if c.isalpha())
+        if alpha / len(w) >= 0.7:
+            words.append(w.lower())
+    return words
+
+
+def _texts_similar(a: str, b: str, threshold: float = 0.75) -> bool:
+    """Check if two OCR texts are similar enough to be the same subtitle.
+
+    Uses three strategies, from fast to thorough:
+    1. Normalized full-text exact/containment match
+    2. SequenceMatcher on normalized text (catches OCR jitter)
+    3. Real-word overlap — compares only plausible dictionary words,
+       ignoring garbage tokens from background noise.  This is the key
+       defence against repeated reads when the background behind
+       subtitles changes and adds/removes noise around the same text.
+    """
+    if not a or not b:
+        return False
+    norm_a = " ".join(a.split())
+    norm_b = " ".join(b.split())
+    if norm_a == norm_b:
+        return True
+    # Containment check (partial OCR of same subtitle)
+    if norm_a in norm_b or norm_b in norm_a:
+        return True
+    # Full-text similarity
+    if SequenceMatcher(None, norm_a, norm_b).ratio() >= threshold:
+        return True
+
+    # Real-word overlap: if most real words are shared, it's the
+    # same subtitle with different background garbage.
+    words_a = _extract_real_words(a)
+    words_b = _extract_real_words(b)
+    if len(words_a) >= 2 and len(words_b) >= 2:
+        set_a = set(words_a)
+        set_b = set(words_b)
+        overlap = len(set_a & set_b)
+        # What fraction of the SMALLER set is covered?
+        smaller = min(len(set_a), len(set_b))
+        if overlap / smaller >= 0.6:
+            return True
+
+    return False
 
 
 def _filter_ocr_garbage(text: str) -> str:
@@ -179,11 +239,12 @@ class OcrWorker(QThread):
 
                     # Debug saves
                     if DEBUG_SAVE and self._capture_count < 20:
+                        os.makedirs(_DEBUG_DIR, exist_ok=True)
                         Image.fromarray(raw_rgb).save(
-                            f"/tmp/crr_raw_{self._capture_count}.png"
+                            os.path.join(_DEBUG_DIR, f"crr_raw_{self._capture_count}.png")
                         )
                         ocr_img.save(
-                            f"/tmp/crr_isolated_{self._capture_count}.png"
+                            os.path.join(_DEBUG_DIR, f"crr_isolated_{self._capture_count}.png")
                         )
                         print(
                             f"[OCR] Saved debug captures #{self._capture_count}"
@@ -207,18 +268,12 @@ class OcrWorker(QThread):
                         if filtered != text:
                             print(f"[OCR] After filter: {repr(filtered[:200] if filtered else '<empty>')}")
                         text = filtered
-                        if text and text != self._last_emitted_text:
-                            # Skip if new text is a subset of what we already
-                            # emitted (OCR caught only 1 of 2 lines this frame).
-                            norm_new = " ".join(text.split())
-                            norm_old = " ".join(self._last_emitted_text.split())
-                            if norm_new and norm_old and norm_new in norm_old:
-                                print(f"[OCR] Skip subset of last")
+                        if text:
+                            if _texts_similar(text, self._last_emitted_text):
+                                print(f"[OCR] Dedup: similar to last")
                             else:
                                 self._last_emitted_text = text
                                 self.text_recognized.emit(text)
-                        elif text and text == self._last_emitted_text:
-                            print(f"[OCR] Dedup: same as last")
                 except Exception as e:
                     self.error_occurred.emit(str(e))
 
