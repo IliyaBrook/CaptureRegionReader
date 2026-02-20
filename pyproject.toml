@@ -30,3 +30,8 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/capture_region_reader"]
+
+[dependency-groups]
+dev = [
+    "ruff>=0.15.2",
+]

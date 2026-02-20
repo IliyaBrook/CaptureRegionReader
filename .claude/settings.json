@@ -1,0 +1,22 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash",
+      "Read",
+      "Edit",
+      "Write",
+      "Glob",
+      "Grep",
+      "WebFetch",
+      "WebSearch"
+    ]
+  },
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "Edit|Write",
+        "command": "if echo \"$CLAUDE_FILE_PATH\" | grep -qE '\\.py$'; then ruff format --quiet \"$CLAUDE_FILE_PATH\" 2>/dev/null && ruff check --fix --quiet \"$CLAUDE_FILE_PATH\" 2>/dev/null; fi; exit 0"
+      }
+    ]
+  }
+}
