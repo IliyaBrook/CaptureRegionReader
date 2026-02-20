@@ -37,16 +37,14 @@ RegionSelector → OcrWorker (mss capture → subtitle 3-step pipeline → OCR e
 
 **app.py** is the orchestrator — creates all workers and the window, wires all Qt signals between them, manages settings load/save lifecycle. It is not a god-class; each component is self-contained.
 
-## OCR Engines
+## OCR Engine
 
-Pluggable OCR via `OcrEngine` protocol (ocr_worker.py). Two implementations:
-- **TesseractEngine**: `needs_text_isolation = True` — requires text_isolator preprocessing.
-- **EasyOcrEngine**: `needs_text_isolation = False` — handles its own preprocessing.
+Uses Tesseract OCR (PSM 6, OEM 1) with the 3-step text isolation pipeline as preprocessing. Supports `eng`, `rus`, and `eng+rus` language modes.
 
 ## TTS Engines
 
-- **edge-tts** (default): cloud-based, uses `en-US-AndrewNeural` / `ru-RU-DmitryNeural`.
-- **XTTS**: local Coqui TTS model for offline synthesis. Configured in settings/main_window.
+- **edge-tts** (default): cloud-based Microsoft Edge neural TTS, uses `en-US-AndrewNeural` / `ru-RU-DmitryNeural`.
+- **Silero**: local neural TTS via torch.hub. Russian only (`xenia` voice at 48kHz); falls back to edge-tts for English text.
 
 ## Key Implementation Details
 

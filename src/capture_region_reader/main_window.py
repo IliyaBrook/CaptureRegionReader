@@ -291,7 +291,6 @@ class MainWindow(QMainWindow):
         # TTS engine
         self._combo_tts = QComboBox()
         self._combo_tts.setStyleSheet(_COMBO_STYLE)
-        self._combo_tts.addItem("XTTS-v2 (local, multilingual)", "xtts")
         self._combo_tts.addItem("Silero (local, Russian only)", "silero")
         self._combo_tts.addItem("Edge-TTS (cloud)", "edge-tts")
         for i in range(self._combo_tts.count()):
@@ -599,7 +598,7 @@ class MainWindow(QMainWindow):
                 break
         self._combo_tts.blockSignals(False)
 
-        engine_names = {"silero": "Silero TTS", "edge-tts": "Edge-TTS", "xtts": "XTTS-v2"}
+        engine_names = {"silero": "Silero TTS", "edge-tts": "Edge-TTS"}
         display_name = engine_names.get(failed_engine, failed_engine)
 
         QMessageBox.warning(
@@ -608,7 +607,7 @@ class MainWindow(QMainWindow):
             f"Failed to load <b>{display_name}</b> engine.\n\n"
             f"Error: {error_msg}\n\n"
             f"Install the required packages or choose a different engine.\n\n"
-            f"For Silero TTS (local, GPU):\n"
+            f"For Silero TTS (local):\n"
             f"  uv pip install torch\n\n"
             f"For Edge-TTS (cloud):\n"
             f"  uv pip install edge-tts",

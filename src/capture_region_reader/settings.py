@@ -13,7 +13,7 @@ class AppSettings:
     speech_rate: int = 150
     volume: float = 1.0
     ocr_interval_ms: int = 500
-    tts_engine: str = "xtts"       # "xtts" (local, multilingual) | "silero" (local, RU) | "edge-tts" (cloud)
+    tts_engine: str = "edge-tts"   # "silero" (local, RU) | "edge-tts" (cloud)
     settle_time_ms: int = 300      # 0-2000ms, text stabilization delay
 
     def save(self) -> None:
@@ -53,6 +53,6 @@ class AppSettings:
             speech_rate=int(s.value("speech_rate", 150)),
             volume=float(s.value("volume", 1.0)),
             ocr_interval_ms=int(s.value("ocr_interval_ms", 500)),
-            tts_engine=str(s.value("tts_engine", "xtts")),
+            tts_engine=str(s.value("tts_engine", "edge-tts")),
             settle_time_ms=int(s.value("settle_time_ms", 300)),
         )
