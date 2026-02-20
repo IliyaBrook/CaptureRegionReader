@@ -269,8 +269,9 @@ class OcrWorker(QThread):
         isolated = isolate_text(raw_rgb)
 
         if isolated is None:
-            logger.warning(
-                "isolate_text returned None for frame %d (input shape=%s)",
+            logger.debug(
+                "isolate_text returned None for frame %d (input shape=%s), "
+                "falling back to raw image for OCR",
                 self._capture_count, raw_rgb.shape,
             )
             # Debug: save the input that caused None
@@ -279,19 +280,17 @@ class OcrWorker(QThread):
                 Image.fromarray(raw_rgb).save(
                     os.path.join(_DEBUG_DIR, f"crr_none_input_{self._capture_count}.png")
                 )
+            # Fallback: use raw image directly for OCR (e.g. black text on white)
+            ocr_img = _upscale(Image.fromarray(raw_rgb))
+            # Show raw as the processed preview (no isolation was applied)
             p_h, p_w = raw_rgb.shape[:2]
             self.frame_captured.emit(raw_rgb.tobytes(), p_w, p_h)
-            # Emit empty string so TextDiffer knows text disappeared
-            self.text_recognized.emit("")
-            self.msleep(self._interval_ms)
-            return
-
-        ocr_img = _upscale(Image.fromarray(isolated))
-
-        # Send the processed image to preview
-        preview_rgb = np.array(ocr_img)
-        p_h, p_w = preview_rgb.shape[:2]
-        self.frame_captured.emit(preview_rgb.tobytes(), p_w, p_h)
+        else:
+            ocr_img = _upscale(Image.fromarray(isolated))
+            # Send the processed (isolated) image to preview
+            preview_rgb = np.array(ocr_img)
+            p_h, p_w = preview_rgb.shape[:2]
+            self.frame_captured.emit(preview_rgb.tobytes(), p_w, p_h)
 
         # Debug saves
         if DEBUG_SAVE and self._capture_count < 20:
