@@ -55,6 +55,7 @@ class App:
         # OCR results
         self._ocr_worker.text_recognized.connect(self._on_text_recognized)
         self._ocr_worker.frame_captured.connect(w.update_capture_preview)
+        self._ocr_worker.raw_frame_captured.connect(w.update_raw_preview)
         self._ocr_worker.error_occurred.connect(w.show_error)
 
         # TTS status
@@ -143,6 +144,10 @@ class App:
                 screenshot = sct.grab(monitor)
                 img_array = np.array(screenshot, dtype=np.uint8)
                 raw_rgb = img_array[:, :, :3][:, :, ::-1].copy()
+
+                # Always show raw frame for eyedropper
+                raw_h, raw_w = raw_rgb.shape[:2]
+                self._window.update_raw_preview(raw_rgb.tobytes(), raw_w, raw_h)
 
                 engine = self._ocr_worker._engine
                 use_isolation = getattr(engine, "needs_text_isolation", True) if engine else True

@@ -946,6 +946,7 @@ class OcrWorker(QThread):
     """
     text_recognized = pyqtSignal(str)
     frame_captured = pyqtSignal(bytes, int, int)
+    raw_frame_captured = pyqtSignal(bytes, int, int)  # original RGB (before isolation)
     error_occurred = pyqtSignal(str)
     engine_unavailable = pyqtSignal(str, str)  # (engine_name, error_message)
 
@@ -1066,6 +1067,10 @@ class OcrWorker(QThread):
 
         # BGRA -> RGB
         raw_rgb = img_array[:, :, :3][:, :, ::-1].copy()
+
+        # Always emit the raw frame (used by eyedropper for color picking)
+        raw_h, raw_w = raw_rgb.shape[:2]
+        self.raw_frame_captured.emit(raw_rgb.tobytes(), raw_w, raw_h)
 
         # Choose preprocessing path based on engine
         use_isolation = getattr(self._engine, "needs_text_isolation", True)

@@ -123,6 +123,7 @@ class MainWindow(QMainWindow):
         self._eyedropper_active = False
         self._preview_fit_mode = True
         self._preview_original_pixmap: QPixmap | None = None
+        self._raw_pixmap: QPixmap | None = None  # original frame for eyedropper
 
         self.setWindowTitle("CaptureRegionReader")
         if _ICON_PATH.exists():
@@ -488,14 +489,38 @@ class MainWindow(QMainWindow):
 
         self._text_display = QTextEdit()
         self._text_display.setReadOnly(True)
-        self._text_display.setMinimumHeight(100)
+        self._text_display.setMinimumHeight(80)
         self._text_display.setPlaceholderText("Recognized text will appear here...")
         text_layout.addWidget(self._text_display)
 
         layout.addWidget(text_group)
 
-        # --- Capture Preview ---
-        preview_group = QGroupBox("Capture Preview")
+        # --- Raw Capture (for eyedropper + understanding what is captured) ---
+        raw_group = QGroupBox("Raw Capture (click to pick color)")
+        raw_layout = QVBoxLayout(raw_group)
+        raw_layout.setContentsMargins(6, 14, 6, 6)
+
+        self._raw_preview_scroll = QScrollArea()
+        self._raw_preview_scroll.setMinimumHeight(100)
+        self._raw_preview_scroll.setStyleSheet(
+            "QScrollArea { background-color: #1a1a1a; border: 1px solid #333; }"
+        )
+        self._raw_preview_scroll.setWidgetResizable(False)
+
+        self._raw_preview = QLabel("Raw capture will appear here...")
+        self._raw_preview.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._raw_preview.setStyleSheet(
+            "QLabel { background-color: #1a1a1a; color: #666; padding: 4px; }"
+        )
+        # Eyedropper picks color from the RAW preview (not binarized)
+        self._raw_preview.mousePressEvent = self._preview_mouse_press
+        self._raw_preview_scroll.setWidget(self._raw_preview)
+
+        raw_layout.addWidget(self._raw_preview_scroll, stretch=1)
+        layout.addWidget(raw_group, stretch=1)
+
+        # --- Processed Preview (what OCR engine sees) ---
+        preview_group = QGroupBox("Processed Preview (OCR input)")
         preview_layout = QVBoxLayout(preview_group)
         preview_layout.setContentsMargins(6, 14, 6, 6)
 
@@ -514,26 +539,23 @@ class MainWindow(QMainWindow):
         toolbar.addStretch()
         preview_layout.addLayout(toolbar)
 
-        # Scrollable image area
         self._preview_scroll = QScrollArea()
-        self._preview_scroll.setMinimumHeight(160)
+        self._preview_scroll.setMinimumHeight(100)
         self._preview_scroll.setStyleSheet(
             "QScrollArea { background-color: #1a1a1a; border: 1px solid #333; }"
         )
         self._preview_scroll.setWidgetResizable(False)
 
-        self._capture_preview = QLabel("Capture preview will appear here...")
+        self._capture_preview = QLabel("Processed preview will appear here...")
         self._capture_preview.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self._capture_preview.setStyleSheet(
             "QLabel { background-color: #1a1a1a; color: #666; padding: 4px; }"
         )
-        # Enable mouse tracking for eyedropper
-        self._capture_preview.mousePressEvent = self._preview_mouse_press
         self._preview_scroll.setWidget(self._capture_preview)
 
         preview_layout.addWidget(self._preview_scroll, stretch=1)
-
         layout.addWidget(preview_group, stretch=1)
+
         return tab
 
     # ==================================================================
@@ -624,50 +646,50 @@ class MainWindow(QMainWindow):
             self._set_box_color(rgb)
 
     def _on_eyedropper_toggled(self, checked: bool) -> None:
-        """Toggle eyedropper mode: next click on preview picks a color."""
+        """Toggle eyedropper mode: next click on raw preview picks a color."""
         self._eyedropper_active = checked
         if checked:
             self._btn_eyedropper.setStyleSheet(
                 "QPushButton { background-color: #ffcc00; font-weight: bold; }"
             )
-            self._capture_preview.setCursor(Qt.CursorShape.CrossCursor)
+            self._raw_preview.setCursor(Qt.CursorShape.CrossCursor)
             self._status_bar.showMessage(
-                "Eyedropper active \u2014 click on the capture preview to pick a color"
+                "Eyedropper active \u2014 click on the Raw Capture to pick a color"
             )
-            # Switch to Output tab so user can click on the preview
+            # Switch to Output tab so user can click on the raw preview
             self._tabs.setCurrentIndex(1)
         else:
             self._btn_eyedropper.setStyleSheet("")
-            self._capture_preview.setCursor(Qt.CursorShape.ArrowCursor)
+            self._raw_preview.setCursor(Qt.CursorShape.ArrowCursor)
             self._status_bar.showMessage("Ready")
 
     def _preview_mouse_press(self, event: QMouseEvent) -> None:
-        """Handle mouse clicks on the capture preview for eyedropper."""
+        """Handle mouse clicks on the raw preview for eyedropper."""
         if not self._eyedropper_active:
             return
-        if self._preview_original_pixmap is None:
+        if self._raw_pixmap is None:
             return
 
-        # Map click position to the original (unscaled) pixmap coordinates
+        # Map click position to the original (unscaled) raw pixmap coordinates
         click_x = event.position().x()
         click_y = event.position().y()
 
-        displayed = self._capture_preview.pixmap()
+        displayed = self._raw_preview.pixmap()
         if displayed is None:
             return
 
-        # Scale click to original pixmap coordinates
-        scale_x = self._preview_original_pixmap.width() / max(displayed.width(), 1)
-        scale_y = self._preview_original_pixmap.height() / max(displayed.height(), 1)
+        # Scale click to raw pixmap coordinates
+        scale_x = self._raw_pixmap.width() / max(displayed.width(), 1)
+        scale_y = self._raw_pixmap.height() / max(displayed.height(), 1)
         orig_x = int(click_x * scale_x)
         orig_y = int(click_y * scale_y)
 
         # Clamp to pixmap bounds
-        orig_x = max(0, min(orig_x, self._preview_original_pixmap.width() - 1))
-        orig_y = max(0, min(orig_y, self._preview_original_pixmap.height() - 1))
+        orig_x = max(0, min(orig_x, self._raw_pixmap.width() - 1))
+        orig_y = max(0, min(orig_y, self._raw_pixmap.height() - 1))
 
-        # Get the pixel color from the original pixmap
-        img = self._preview_original_pixmap.toImage()
+        # Get the pixel color from the RAW pixmap (not the binarized preview)
+        img = self._raw_pixmap.toImage()
         pixel = img.pixelColor(orig_x, orig_y)
         rgb = (pixel.red(), pixel.green(), pixel.blue())
 
@@ -728,12 +750,32 @@ class MainWindow(QMainWindow):
     def update_text_display(self, text: str) -> None:
         self._text_display.setPlainText(text)
 
+    def update_raw_preview(self, raw_bytes: bytes, width: int, height: int) -> None:
+        """Update the raw capture preview (original screenshot, for eyedropper)."""
+        qimg = QImage(raw_bytes, width, height, width * 3, QImage.Format.Format_RGB888)
+        self._raw_pixmap = QPixmap.fromImage(qimg)
+        self._apply_raw_pixmap()
+
     def update_capture_preview(self, raw_bytes: bytes, width: int, height: int) -> None:
-        """Update the capture preview with the latest screenshot frame."""
+        """Update the processed capture preview (what OCR engine sees)."""
         qimg = QImage(raw_bytes, width, height, width * 3, QImage.Format.Format_RGB888)
         self._preview_original_pixmap = QPixmap.fromImage(qimg)
         self._lbl_preview_info.setText(f"{width}\u00d7{height} px")
         self._apply_preview_pixmap()
+
+    def _apply_raw_pixmap(self) -> None:
+        """Apply the raw pixmap (always fit to scroll width)."""
+        if self._raw_pixmap is None:
+            return
+        scroll_w = self._raw_preview_scroll.viewport().width() - 4
+        if scroll_w > 0 and self._raw_pixmap.width() > scroll_w:
+            scaled = self._raw_pixmap.scaledToWidth(
+                scroll_w, Qt.TransformationMode.SmoothTransformation
+            )
+        else:
+            scaled = self._raw_pixmap
+        self._raw_preview.setPixmap(scaled)
+        self._raw_preview.resize(scaled.size())
 
     def _apply_preview_pixmap(self) -> None:
         """Apply the stored pixmap in Fit or 1:1 mode."""

@@ -427,15 +427,66 @@ def _crop_to_dark_box(
 # Color box detection (box_search mode — universal, any background color)
 # ---------------------------------------------------------------------------
 
+def _max_rectangle_in_binary(binary: np.ndarray) -> tuple[int, int, int, int] | None:
+    """Find the largest axis-aligned rectangle of 1s in a binary matrix.
+
+    Uses the histogram-stack algorithm: O(rows * cols).
+    Height computation is vectorized with numpy; the monotonic stack
+    runs per-row in Python (stack operations don't vectorize well).
+
+    Returns (x, y, w, h) of the largest rectangle, or None if empty.
+    """
+    if binary.size == 0:
+        return None
+
+    rows, cols = binary.shape
+
+    # Pre-compute all histogram heights using numpy (vectorized).
+    # heights[r, c] = number of consecutive 1s ending at row r in column c.
+    all_heights = np.zeros((rows, cols), dtype=np.int32)
+    all_heights[0] = binary[0]
+    for r in range(1, rows):
+        all_heights[r] = np.where(binary[r], all_heights[r - 1] + 1, 0)
+
+    best_area = 0
+    best_rect: tuple[int, int, int, int] | None = None
+
+    for r in range(rows):
+        heights = all_heights[r]
+
+        # Largest rectangle in histogram (monotonic stack)
+        stack: list[int] = []
+        for c in range(cols + 1):
+            h = int(heights[c]) if c < cols else 0
+            while stack and int(heights[stack[-1]]) > h:
+                height = int(heights[stack.pop()])
+                width = c if not stack else c - stack[-1] - 1
+                area = height * width
+                if area > best_area:
+                    best_area = area
+                    x = stack[-1] + 1 if stack else 0
+                    y = r - height + 1
+                    best_rect = (int(x), int(y), int(width), int(height))
+            stack.append(c)
+
+    return best_rect
+
+
 def _find_colored_subtitle_box(
     rgb: np.ndarray,
     cfg: IsolatorConfig,
 ) -> tuple[int, int, int, int] | None:
     """Detect a rectangular subtitle bar with a user-specified background color.
 
-    This is the universal version of _find_dark_subtitle_box(). Instead of
-    looking for dark pixels, it looks for pixels close to cfg.box_search_color
-    (set by the user via a color picker).
+    Algorithm:
+    1. Create binary mask: pixels within tolerance of cfg.box_search_color.
+    2. Large morphological closing to fill text-sized holes inside the box.
+       Text characters are NOT the target color, so they create gaps in the
+       mask. Closing bridges those gaps so the box becomes a solid filled
+       rectangle.
+    3. Downscale the closed mask (for speed) and find the largest inscribed
+       rectangle using the histogram-stack O(n*m) algorithm.
+    4. Scale coordinates back to original resolution.
 
     Works for any background color: black, yellow, blue, semi-transparent
     overlays, etc. — as long as the user has picked the correct color.
@@ -446,112 +497,67 @@ def _find_colored_subtitle_box(
         return None
 
     img_h, img_w = rgb.shape[:2]
-    img_area = img_h * img_w
 
-    target_r, target_g, target_b = cfg.box_search_color
+    target = np.array(cfg.box_search_color, dtype=np.float32)
     tolerance = cfg.box_search_tolerance
 
-    # Step 1: Create a mask of pixels close to the target color.
-    # Compute Euclidean distance in RGB space for each pixel.
-    # Using float32 to avoid uint8 overflow in squared differences.
+    # Step 1: Euclidean RGB distance → binary mask.
     rgb_f = rgb.astype(np.float32)
-    diff_r = rgb_f[:, :, 0] - target_r
-    diff_g = rgb_f[:, :, 1] - target_g
-    diff_b = rgb_f[:, :, 2] - target_b
-    dist = np.sqrt(diff_r * diff_r + diff_g * diff_g + diff_b * diff_b)
+    dist = np.sqrt(np.sum((rgb_f - target) ** 2, axis=2))
+    mask = (dist <= tolerance).astype(np.uint8) * 255
 
-    # Pixels within tolerance → white (foreground), others → black
-    color_mask = np.zeros((img_h, img_w), dtype=np.uint8)
-    color_mask[dist <= tolerance] = 255
-
-    # Step 2: Morphological closing to merge nearby matching patches.
-    # Text inside the box won't match the background color, creating holes.
-    close_k = max(5, img_w // 60)
+    # Step 2: Large morphological closing to fill text holes.
+    # Subtitle text is typically 10-20% of the box height. The closing
+    # kernel must be large enough to bridge character-sized gaps.
+    close_k = max(15, img_h // 6)
     close_kernel = cv2.getStructuringElement(
         cv2.MORPH_RECT, (close_k, close_k)
     )
-    color_mask = cv2.morphologyEx(color_mask, cv2.MORPH_CLOSE, close_kernel)
+    closed = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, close_kernel)
 
-    # Step 3: Find contours
-    contours, _ = cv2.findContours(
-        color_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
-    )
+    # Step 3: Downscale for fast max-rectangle search.
+    # The histogram-stack algo is O(n*m) with Python loops, so we
+    # reduce resolution to keep it under ~20ms. Scale factor ≤ 4.
+    max_dim = max(img_h, img_w)
+    scale = max(1, max_dim // 500)  # target ~500px on longest side
+    scale = min(scale, 4)
 
-    if not contours:
+    if scale > 1:
+        small_h = img_h // scale
+        small_w = img_w // scale
+        small = cv2.resize(closed, (small_w, small_h), interpolation=cv2.INTER_AREA)
+    else:
+        small = closed
+        small_h, small_w = img_h, img_w
+
+    rect = _max_rectangle_in_binary((small > 0).astype(np.uint8))
+
+    if rect is None:
         return None
 
-    # Step 4: Evaluate candidates
-    min_area = img_area * cfg.box_search_min_area_ratio
-    min_width = img_w * cfg.box_search_min_width_ratio
+    # Scale coordinates back to original resolution.
+    sx, sy, sw, sh = rect
+    x = sx * scale
+    y = sy * scale
+    w = sw * scale
+    h = sh * scale
 
-    best_candidate: tuple[int, int, int, int] | None = None
-    best_area = 0
+    # Clamp to image bounds
+    w = min(w, img_w - x)
+    h = min(h, img_h - y)
 
-    for cnt in contours:
-        x, y, w, h = cv2.boundingRect(cnt)
-        box_area = w * h
+    # Validate: the rectangle must be a meaningful subtitle box.
+    img_area = img_h * img_w
+    if w * h < img_area * cfg.box_search_min_area_ratio:
+        return None
+    if h == 0:
+        return None
+    if w / h < cfg.box_search_min_aspect_ratio:
+        return None
+    if w < img_w * cfg.box_search_min_width_ratio:
+        return None
 
-        if box_area < min_area:
-            continue
-
-        if h == 0:
-            continue
-        aspect = w / h
-        if aspect < cfg.box_search_min_aspect_ratio:
-            continue
-
-        if w < min_width:
-            continue
-
-        # Uniformity check: measure std of the MATCHING pixels inside the box.
-        # Only look at pixels that are near the target color (the background).
-        # Text pixels (different color) are excluded from this check.
-        roi = rgb[y : y + h, x : x + w]
-        roi_f = roi.astype(np.float32)
-        roi_dist = np.sqrt(
-            (roi_f[:, :, 0] - target_r) ** 2
-            + (roi_f[:, :, 1] - target_g) ** 2
-            + (roi_f[:, :, 2] - target_b) ** 2
-        )
-        matching_pixels = roi_dist[roi_dist <= tolerance]
-
-        # At least 30% of the box must match the target color
-        if len(matching_pixels) < 0.3 * roi_dist.size:
-            continue
-
-        internal_std = float(np.std(matching_pixels))
-        if internal_std > cfg.box_search_max_internal_std:
-            continue
-
-        if box_area > best_area:
-            best_area = box_area
-            best_candidate = (x, y, w, h)
-
-    return best_candidate
-
-
-def _crop_to_colored_box(
-    rgb: np.ndarray,
-    gray: np.ndarray,
-    box: tuple[int, int, int, int],
-    cfg: IsolatorConfig,
-) -> tuple[np.ndarray, np.ndarray, int, int]:
-    """Crop RGB and grayscale images to the colored box region.
-
-    Returns (cropped_rgb, cropped_gray, offset_x, offset_y).
-    """
-    img_h, img_w = gray.shape
-    bx, by, bw, bh = box
-
-    pad_x = int(bw * cfg.box_search_padding_ratio)
-    pad_y = int(bh * cfg.box_search_padding_ratio)
-
-    x1 = max(0, bx - pad_x)
-    y1 = max(0, by - pad_y)
-    x2 = min(img_w, bx + bw + pad_x)
-    y2 = min(img_h, by + bh + pad_y)
-
-    return rgb[y1:y2, x1:x2], gray[y1:y2, x1:x2], x1, y1
+    return (x, y, w, h)
 
 
 # ---------------------------------------------------------------------------
@@ -956,16 +962,22 @@ def isolate_text(
     if _is_blank_frame(gray, cfg):
         return None
 
-    if mode == "box_search" and cfg.box_search_color is not None:
-        # Box search mode: find a subtitle box matching the user-picked color.
-        # Operates on the RGB image (color-based detection), then crops both
-        # RGB and grayscale to the box region.
+    if mode == "box_search":
+        # Box search mode: find a subtitle box matching the user-picked color
+        # and return ONLY the cropped rectangle — no binarization, no character
+        # detection, no further processing. The raw cropped image goes straight
+        # to OCR (e.g., white text on black background is already ideal for
+        # Tesseract without any Otsu thresholding).
         color_box = _find_colored_subtitle_box(rgb, cfg)
         if color_box is not None:
-            rgb, gray, _, _ = _crop_to_colored_box(rgb, gray, color_box, cfg)
-            h, w = gray.shape
-            if h < 10 or w < 10:
+            bx, by, bw, bh = color_box
+            cropped = rgb[by : by + bh, bx : bx + bw]
+            if cropped.shape[0] < 10 or cropped.shape[1] < 10:
                 return None
+            # Return the cropped RGB directly — no further pipeline steps.
+            return cropped.copy()
+        # Box not found — return None (no text to process)
+        return None
     else:
         # Default mode: dark subtitle box detection.
         # Broadcasts and news programs place subtitles in a dark rectangular

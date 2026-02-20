@@ -26,24 +26,38 @@ There is no automated test suite. The `.tests/` directory contains manual test a
 
 **Threading model** — three threads communicating via Qt signals:
 - **Main thread**: Qt event loop, UI (MainWindow), region selection overlay (RegionSelector)
-- **OCR thread** (QThread): continuous screenshot → text isolation → Tesseract OCR (OcrWorker)
-- **TTS thread** (QThread): async queue-based edge-tts synthesis + ffplay playback (TtsWorker)
+- **OCR thread** (QThread): continuous screenshot → text isolation → OCR engine (OcrWorker)
+- **TTS thread** (QThread): async queue-based TTS synthesis + playback (TtsWorker)
 
 **Data pipeline**:
 ```
-RegionSelector → OcrWorker (mss capture → TextIsolator → pytesseract)
+RegionSelector → OcrWorker (mss capture → TextIsolator → OCR engine)
     → TextDiffer (dedup) → TextCleaner (garbage removal) → TtsWorker (speech)
 ```
 
 **app.py** is the orchestrator — creates all workers and the window, wires all Qt signals between them, manages settings load/save lifecycle. It is not a god-class; each component is self-contained.
 
+## OCR Engines
+
+Pluggable OCR via `OcrEngine` protocol (ocr_worker.py). Two implementations:
+- **TesseractEngine**: `needs_text_isolation = True` — requires text_isolator preprocessing.
+- **EasyOcrEngine**: `needs_text_isolation = False` — handles its own preprocessing.
+
+## TTS Engines
+
+- **edge-tts** (default): cloud-based, uses `en-US-AndrewNeural` / `ru-RU-DmitryNeural`.
+- **XTTS**: local Coqui TTS model for offline synthesis. Configured in settings/main_window.
+
 ## Key Implementation Details
 
 - **Coordinate spaces**: RegionSelector converts Qt logical coordinates to physical X11 pixels (for mss). High-DPI device pixel ratio is applied in region_selector.py. This is a common source of bugs.
 - **Text isolation** (text_isolator.py): OpenCV pipeline that detects text contours via Otsu thresholding, clusters characters into lines, scores candidate subtitle lines, and crops/binarizes the result. Handles both light-on-dark and dark-on-light text.
+- **Text isolation modes**: `dark_box` (default, detects dark subtitle bars) and `box_search` (user picks a color via eyedropper; uses max-inscribed-rectangle algorithm on color mask). `box_search` returns raw cropped RGB without binarization.
+- **IsolatorConfig** (text_isolator.py): dataclass with all tunable parameters for both isolation modes. Parameters prefixed `dark_box_*` or `box_search_*`.
+- **Two preview panels**: "Raw Capture" (original screenshot, used by eyedropper) and "Processed Preview" (what OCR engine sees after isolation). OcrWorker emits both `raw_frame_captured` and `frame_captured` signals.
 - **Triple deduplication** in TextDiffer: exact match, 85% similarity threshold, and growth detection (for scrolling/streaming subtitles).
 - **Fake Cyrillic detection** in TextCleaner: catches Latin words misrecognized as Cyrillic by Tesseract.
-- **TTS voices**: English uses `en-US-AndrewNeural`, Russian uses `ru-RU-DmitryNeural`. Language can be auto-detected or fixed.
+- **TTS voices** (edge-tts): English uses `en-US-AndrewNeural`, Russian uses `ru-RU-DmitryNeural`. Language can be auto-detected or fixed.
 - **Settings persistence**: AppSettings dataclass serialized via QSettings. Loaded in app.py at startup, saved on shutdown.
 - **Global hotkeys**: pynput-based listener on a daemon thread (hotkey_manager.py). Default: Ctrl+Alt+R (start/stop), Ctrl+Alt+S (select region).
 
