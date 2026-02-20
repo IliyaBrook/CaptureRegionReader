@@ -15,7 +15,6 @@ dependencies = [
     "torch>=2.0",
     "scipy>=1.12",
     "omegaconf>=2.3",
-    "easyocr>=1.7",
     "coqui-tts[codec]>=0.24",
     "torchaudio>=2.0",
     "transformers>=4.33,<5",

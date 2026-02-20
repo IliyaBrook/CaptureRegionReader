@@ -31,7 +31,7 @@ There is no automated test suite. The `.tests/` directory contains manual test a
 
 **Data pipeline**:
 ```
-RegionSelector → OcrWorker (mss capture → TextIsolator → OCR engine)
+RegionSelector → OcrWorker (mss capture → subtitle 3-step pipeline → OCR engine)
     → TextDiffer (dedup) → TextCleaner (garbage removal) → TtsWorker (speech)
 ```
 
@@ -51,10 +51,13 @@ Pluggable OCR via `OcrEngine` protocol (ocr_worker.py). Two implementations:
 ## Key Implementation Details
 
 - **Coordinate spaces**: RegionSelector converts Qt logical coordinates to physical X11 pixels (for mss). High-DPI device pixel ratio is applied in region_selector.py. This is a common source of bugs.
-- **Text isolation** (text_isolator.py): OpenCV pipeline that detects text contours via Otsu thresholding, clusters characters into lines, scores candidate subtitle lines, and crops/binarizes the result. Handles both light-on-dark and dark-on-light text.
-- **Text isolation modes**: `dark_box` (default, detects dark subtitle bars) and `box_search` (user picks a color via eyedropper; uses max-inscribed-rectangle algorithm on color mask). `box_search` returns raw cropped RGB without binarization.
-- **IsolatorConfig** (text_isolator.py): dataclass with all tunable parameters for both isolation modes. Parameters prefixed `dark_box_*` or `box_search_*`.
-- **Two preview panels**: "Raw Capture" (original screenshot, used by eyedropper) and "Processed Preview" (what OCR engine sees after isolation). OcrWorker emits both `raw_frame_captured` and `frame_captured` signals.
+- **Text isolation** — 3-step OpenCV pipeline (ported from square-cropper):
+  1. **subtitle_detector.py**: character detection → block formation → boundary refinement → cropping. Handles both dark-background and light-background subtitles adaptively.
+  2. **subtitle_binarizer.py**: Otsu thresholding → noise component removal → black-text-on-white output.
+  3. **subtitle_cleaner.py**: connected component analysis → line grouping → artifact removal → final crop.
+  - **text_isolator.py** is a thin wrapper: `isolate_text(rgb)` converts RGB→BGR, calls `detect_and_crop()`, converts result BGR→RGB.
+  - All thresholds are relative to image dimensions (no hardcoded pixel sizes). Output is scaled to original width via INTER_LANCZOS4.
+- **Two preview panels**: "Raw Capture" (original screenshot) and "Processed Preview" (what OCR engine sees after isolation). OcrWorker emits both `raw_frame_captured` and `frame_captured` signals.
 - **Triple deduplication** in TextDiffer: exact match, 85% similarity threshold, and growth detection (for scrolling/streaming subtitles).
 - **Fake Cyrillic detection** in TextCleaner: catches Latin words misrecognized as Cyrillic by Tesseract.
 - **TTS voices** (edge-tts): English uses `en-US-AndrewNeural`, Russian uses `ru-RU-DmitryNeural`. Language can be auto-detected or fixed.

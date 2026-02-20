@@ -16,7 +16,6 @@ import logging
 import os
 import re
 import time
-from typing import Protocol
 
 import numpy as np
 import pytesseract
@@ -24,7 +23,7 @@ from mss import mss
 from PIL import Image
 from PyQt6.QtCore import QThread, pyqtSignal
 
-from capture_region_reader.text_isolator import IsolatorConfig, isolate_text
+from capture_region_reader.text_isolator import isolate_text
 
 logger = logging.getLogger(__name__)
 
@@ -654,9 +653,6 @@ def _find_positional_replacement(
 MIN_WIDTH = 600
 MIN_HEIGHT = 100
 
-# Minimum dimensions for EasyOCR (from RSTGameTranslation).
-EASYOCR_MIN_WIDTH = 1024
-EASYOCR_MIN_HEIGHT = 768
 
 # Debug: save captures to .tests/debug/ for inspection.
 DEBUG_SAVE = os.environ.get("CRR_DEBUG", "0") == "1"
@@ -664,16 +660,17 @@ _DEBUG_DIR = os.path.join(os.path.dirname(__file__), "..", "..", ".tests", "debu
 
 
 # ---------------------------------------------------------------------------
-# OCR engine abstraction
+# OCR engine (Tesseract only)
 # ---------------------------------------------------------------------------
 
-class OcrEngine(Protocol):
-    """Protocol for OCR engines."""
-    def recognize(self, image: Image.Image, language: str) -> str: ...
+_TESSERACT_CONFIG = "--psm 6 --oem 1"
+
+# Languages that need a supplementary English pass
+_NEEDS_ENG_PASS = {"rus", "eng+rus", "rus+eng"}
 
 
-class TesseractEngine:
-    """Tesseract OCR engine (default, lightweight).
+def _recognize(image: Image.Image, language: str) -> str:
+    """Run Tesseract OCR on a PIL image.
 
     Uses PSM 6 (single uniform block of text) and OEM 1 (LSTM neural net).
 
@@ -682,82 +679,20 @@ class TesseractEngine:
     Russian text (brand names, tech terms, etc.) into pseudo-Cyrillic garbage.
     We run a second pass with eng-only and merge at word level — garbled
     pseudo-Cyrillic words are replaced with their clean English counterparts.
-
-    For "eng+rus" mode, this is mainly a safety net (eng+rus handles most
-    mixed text well). For "rus" mode, this is essential because Tesseract
-    has no English model loaded and WILL garble every Latin word.
     """
+    primary = pytesseract.image_to_string(
+        image, lang=language, config=_TESSERACT_CONFIG
+    ).strip()
 
-    _TESSERACT_CONFIG = "--psm 6 --oem 1"
-
-    # Languages that need a supplementary English pass
-    _NEEDS_ENG_PASS = {"rus", "eng+rus", "rus+eng"}
-
-    def recognize(self, image: Image.Image, language: str) -> str:
-        primary = pytesseract.image_to_string(
-            image, lang=language, config=self._TESSERACT_CONFIG
+    # Dual-pass: run eng-only to fix garbled English words
+    if language in _NEEDS_ENG_PASS and primary:
+        eng_only = pytesseract.image_to_string(
+            image, lang="eng", config=_TESSERACT_CONFIG
         ).strip()
+        if eng_only:
+            primary = _merge_bilingual_ocr(primary, eng_only)
 
-        # Dual-pass: run eng-only to fix garbled English words
-        if language in self._NEEDS_ENG_PASS and primary:
-            eng_only = pytesseract.image_to_string(
-                image, lang="eng", config=self._TESSERACT_CONFIG
-            ).strip()
-            if eng_only:
-                primary = _merge_bilingual_ocr(primary, eng_only)
-
-        return primary
-
-
-class EasyOcrEngine:
-    """EasyOCR engine with GPU support (optional, requires easyocr package).
-
-    EasyOCR has its own CRAFT text detection model so it works best with
-    the original (non-binarized) image. We apply HDR-adaptive preprocessing
-    but skip the text_isolator pipeline.
-    """
-
-    # EasyOCR works on raw images, not binarized text_isolator output.
-    needs_text_isolation = False
-
-    _LANG_MAP = {
-        "eng": ["en"],
-        "rus": ["ru"],
-        "eng+rus": ["en", "ru"],
-    }
-
-    def __init__(self) -> None:
-        self._reader = None
-        self._current_langs: list[str] | None = None
-
-    def recognize(self, image: Image.Image, language: str) -> str:
-        langs = self._LANG_MAP.get(language, [language])
-
-        if self._reader is None or self._current_langs != langs:
-            import easyocr
-            import torch
-
-            gpu = torch.cuda.is_available()
-            logger.info("EasyOCR init: langs=%s, gpu=%s", langs, gpu)
-            self._reader = easyocr.Reader(langs, gpu=gpu)
-            self._current_langs = langs
-
-        img_array = np.array(image)
-        results = self._reader.readtext(img_array, detail=0)
-        return "\n".join(results).strip()
-
-
-def create_engine(name: str) -> OcrEngine:
-    """Create an OCR engine by name.
-
-    Raises ImportError if the requested engine's dependencies are missing.
-    The caller is responsible for handling the error and informing the user.
-    """
-    if name == "easyocr":
-        import easyocr  # noqa: F401
-        import torch  # noqa: F401
-        return EasyOcrEngine()
-    return TesseractEngine()
+    return primary
 
 
 # ---------------------------------------------------------------------------
@@ -883,52 +818,6 @@ def _upscale(img: Image.Image) -> Image.Image:
     return img
 
 
-def _preprocess_for_easyocr(raw_rgb: np.ndarray) -> Image.Image:
-    """Preprocess image for EasyOCR following RSTGameTranslation approach.
-
-    Pipeline:
-    1. HDR-adaptive enhancement (CLAHE + bilateral + sharpen) on grayscale
-       OR basic contrast + median filter
-    2. Convert back to RGB (EasyOCR accepts both but RGB is standard)
-    3. Upscale to minimum 1024x768 with LANCZOS
-
-    No text isolation or contour detection -- EasyOCR has its own
-    CRAFT text detector that works best on natural/enhanced images.
-    """
-    import cv2
-    from PIL import ImageEnhance, ImageFilter
-
-    gray = cv2.cvtColor(raw_rgb, cv2.COLOR_RGB2GRAY)
-    mean_br = float(np.mean(gray))
-    std_br = float(np.std(gray))
-
-    needs_enhanced = std_br < 40 or mean_br > 200 or mean_br < 55
-
-    if needs_enhanced:
-        clahe = cv2.createCLAHE(clipLimit=2.5, tileGridSize=(8, 8))
-        enhanced = clahe.apply(gray)
-        denoised = cv2.bilateralFilter(enhanced, 5, 50, 50)
-        kernel = np.array([[-1, -1, -1], [-1, 9, -1], [-1, -1, -1]])
-        sharpened = cv2.filter2D(denoised, -1, kernel=kernel)
-        result_rgb = cv2.cvtColor(sharpened, cv2.COLOR_GRAY2RGB)
-        img = Image.fromarray(result_rgb)
-    else:
-        img = Image.fromarray(raw_rgb).convert("L")
-        img = ImageEnhance.Contrast(img).enhance(2.0)
-        img = img.filter(ImageFilter.MedianFilter(size=3))
-        img = img.convert("RGB")
-
-    # Upscale to EasyOCR minimum dimensions
-    w, h = img.size
-    if w < EASYOCR_MIN_WIDTH or h < EASYOCR_MIN_HEIGHT:
-        scale = max(EASYOCR_MIN_WIDTH / w, EASYOCR_MIN_HEIGHT / h)
-        new_w = int(w * scale)
-        new_h = int(h * scale)
-        img = img.resize((new_w, new_h), Image.Resampling.LANCZOS)
-
-    return img
-
-
 # ---------------------------------------------------------------------------
 # OCR Worker thread
 # ---------------------------------------------------------------------------
@@ -948,7 +837,6 @@ class OcrWorker(QThread):
     frame_captured = pyqtSignal(bytes, int, int)
     raw_frame_captured = pyqtSignal(bytes, int, int)  # original RGB (before isolation)
     error_occurred = pyqtSignal(str)
-    engine_unavailable = pyqtSignal(str, str)  # (engine_name, error_message)
 
     def __init__(self) -> None:
         super().__init__()
@@ -957,10 +845,6 @@ class OcrWorker(QThread):
         self._interval_ms: int = 500
         self._running: bool = False
         self._capture_count: int = 0
-        self._engine: OcrEngine | None = None
-        self._engine_name: str = ""
-        self._isolator_mode: str = "default"
-        self._isolator_config: IsolatorConfig = IsolatorConfig()
 
     def configure(
         self,
@@ -977,8 +861,8 @@ class OcrWorker(QThread):
         self._interval_ms = interval_ms
         self._capture_count = 0
         logger.info(
-            "OCR configured: region=(%d,%d,%d,%d), lang=%s, engine=%s",
-            *region, language, self._engine_name,
+            "OCR configured: region=(%d,%d,%d,%d), lang=%s",
+            *region, language,
         )
 
     def set_language(self, language: str) -> None:
@@ -987,56 +871,9 @@ class OcrWorker(QThread):
     def set_interval(self, interval_ms: int) -> None:
         self._interval_ms = interval_ms
 
-    def set_engine(self, engine_name: str) -> None:
-        """Switch OCR engine. Safe to call while running.
-
-        If the requested engine is not installed, emits engine_unavailable
-        signal so the UI can revert the combo box and inform the user.
-        Does NOT silently fall back to another engine — the user must know.
-        """
-        if engine_name == self._engine_name:
-            return
-        try:
-            old_name = self._engine_name
-            self._engine = create_engine(engine_name)
-            self._engine_name = engine_name
-            logger.info("OCR engine switched: %s -> %s", old_name, engine_name)
-        except ImportError as e:
-            logger.error("Failed to switch to %s: %s", engine_name, e)
-            # Emit detailed error so the UI can show a dialog
-            self.engine_unavailable.emit(engine_name, str(e))
-            # Do NOT silently fall back. If no engine is loaded at all
-            # (first startup), load the default to avoid a crash.
-            if self._engine is None:
-                self._engine = TesseractEngine()
-                self._engine_name = "tesseract"
-                logger.info("No engine loaded, defaulting to Tesseract")
-
-    def set_isolator_mode(self, mode: str) -> None:
-        """Set text isolation mode ('default' or 'box_search')."""
-        self._isolator_mode = mode
-        logger.info("Isolator mode set to: %s", mode)
-
-    def set_box_color(self, color: tuple[int, int, int] | None) -> None:
-        """Set the target background color for box_search mode."""
-        self._isolator_config.box_search_color = color
-        if color:
-            logger.info("Box search color set to: RGB(%d, %d, %d)", *color)
-        else:
-            logger.info("Box search color cleared")
-
-    def set_box_color_tolerance(self, tolerance: int) -> None:
-        """Set the color tolerance for box_search mode."""
-        self._isolator_config.box_search_tolerance = tolerance
-        logger.info("Box search tolerance set to: %d", tolerance)
-
     def run(self) -> None:
         """Main OCR loop: capture -> preprocess -> recognize -> emit."""
         self._running = True
-        if self._engine is None:
-            self._engine = TesseractEngine()
-            self._engine_name = "tesseract"
-            logger.warning("Engine was None at run(), defaulting to Tesseract")
 
         with mss() as sct:
             while self._running:
@@ -1072,29 +909,28 @@ class OcrWorker(QThread):
         raw_h, raw_w = raw_rgb.shape[:2]
         self.raw_frame_captured.emit(raw_rgb.tobytes(), raw_w, raw_h)
 
-        # Choose preprocessing path based on engine
-        use_isolation = getattr(self._engine, "needs_text_isolation", True)
+        # Text isolation: detect subtitle region, binarize, clean artifacts
+        isolated = isolate_text(raw_rgb)
 
-        if use_isolation:
-            # Tesseract path: text_isolator creates clean black-on-white image
-            isolated = isolate_text(
-                raw_rgb,
-                config=self._isolator_config,
-                mode=self._isolator_mode,
+        if isolated is None:
+            logger.warning(
+                "isolate_text returned None for frame %d (input shape=%s)",
+                self._capture_count, raw_rgb.shape,
             )
+            # Debug: save the input that caused None
+            if DEBUG_SAVE and self._capture_count < 20:
+                os.makedirs(_DEBUG_DIR, exist_ok=True)
+                Image.fromarray(raw_rgb).save(
+                    os.path.join(_DEBUG_DIR, f"crr_none_input_{self._capture_count}.png")
+                )
+            p_h, p_w = raw_rgb.shape[:2]
+            self.frame_captured.emit(raw_rgb.tobytes(), p_w, p_h)
+            # Emit empty string so TextDiffer knows text disappeared
+            self.text_recognized.emit("")
+            self.msleep(self._interval_ms)
+            return
 
-            if isolated is None:
-                p_h, p_w = raw_rgb.shape[:2]
-                self.frame_captured.emit(raw_rgb.tobytes(), p_w, p_h)
-                # Emit empty string so TextDiffer knows text disappeared
-                self.text_recognized.emit("")
-                self.msleep(self._interval_ms)
-                return
-
-            ocr_img = _upscale(Image.fromarray(isolated))
-        else:
-            # EasyOCR path: HDR enhancement + upscale
-            ocr_img = _preprocess_for_easyocr(raw_rgb)
+        ocr_img = _upscale(Image.fromarray(isolated))
 
         # Send the processed image to preview
         preview_rgb = np.array(ocr_img)
@@ -1110,17 +946,21 @@ class OcrWorker(QThread):
             ocr_img.save(
                 os.path.join(_DEBUG_DIR, f"crr_isolated_{self._capture_count}.png")
             )
+            logger.info(
+                "Debug frame %d saved: raw=%s, isolated=%s",
+                self._capture_count, raw_rgb.shape, ocr_img.size,
+            )
 
         self._capture_count += 1
 
         # Run OCR
         t0 = time.monotonic()
-        text = self._engine.recognize(ocr_img, self._language)
+        text = _recognize(ocr_img, self._language)
         ocr_ms = int((time.monotonic() - t0) * 1000)
 
         logger.debug(
-            "OCR (%dms) %s raw: %s",
-            ocr_ms, self._engine_name, repr(text[:200] if text else ""),
+            "OCR (%dms) raw: %s",
+            ocr_ms, repr(text[:200] if text else ""),
         )
 
         # Filter garbage and emit

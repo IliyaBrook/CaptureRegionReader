@@ -1,10 +1,8 @@
 from __future__ import annotations
 
 from PyQt6.QtCore import Qt, pyqtSignal
-from PyQt6.QtGui import QColor, QIcon, QImage, QKeySequence, QMouseEvent, QPixmap
+from PyQt6.QtGui import QIcon, QImage, QKeySequence, QPixmap
 from PyQt6.QtWidgets import (
-    QCheckBox,
-    QColorDialog,
     QComboBox,
     QFormLayout,
     QGroupBox,
@@ -109,21 +107,16 @@ class MainWindow(QMainWindow):
     hotkey_changed = pyqtSignal(str)
     select_region_hotkey_changed = pyqtSignal(str)
     interval_changed = pyqtSignal(int)
-    ocr_engine_changed = pyqtSignal(str)
     tts_engine_changed = pyqtSignal(str)
     settle_time_changed = pyqtSignal(int)
-    isolator_mode_changed = pyqtSignal(str)
-    box_color_changed = pyqtSignal(object)       # tuple[int,int,int] | None
-    box_color_tolerance_changed = pyqtSignal(int)
 
     def __init__(self, settings: AppSettings) -> None:
         super().__init__()
         self.settings = settings
         self._is_reading = False
-        self._eyedropper_active = False
         self._preview_fit_mode = True
         self._preview_original_pixmap: QPixmap | None = None
-        self._raw_pixmap: QPixmap | None = None  # original frame for eyedropper
+        self._raw_pixmap: QPixmap | None = None
 
         self.setWindowTitle("CaptureRegionReader")
         if _ICON_PATH.exists():
@@ -229,9 +222,6 @@ class MainWindow(QMainWindow):
         # --- Language / OCR / TTS ---
         self._build_engines_group(layout, settings)
 
-        # --- Text Isolation ---
-        self._build_isolator_group(layout, settings)
-
         # --- Sliders (speed, volume, intervals) ---
         self._build_sliders_group(layout, settings)
 
@@ -274,7 +264,7 @@ class MainWindow(QMainWindow):
         parent.addWidget(group)
 
     def _build_engines_group(self, parent: QVBoxLayout, settings: AppSettings) -> None:
-        group = QGroupBox("Language && Engines")
+        group = QGroupBox("Language && Engine")
         form = QFormLayout(group)
         form.setSpacing(8)
         form.setContentsMargins(10, 14, 10, 10)
@@ -298,20 +288,6 @@ class MainWindow(QMainWindow):
         lbl.setStyleSheet(_FORM_LABEL_STYLE)
         form.addRow(lbl, self._combo_lang)
 
-        # OCR engine
-        self._combo_engine = QComboBox()
-        self._combo_engine.setStyleSheet(_COMBO_STYLE)
-        self._combo_engine.addItem("Tesseract", "tesseract")
-        self._combo_engine.addItem("EasyOCR (GPU)", "easyocr")
-        for i in range(self._combo_engine.count()):
-            if self._combo_engine.itemData(i) == settings.ocr_engine:
-                self._combo_engine.setCurrentIndex(i)
-                break
-        self._combo_engine.currentIndexChanged.connect(self._on_engine_changed)
-        lbl = QLabel("OCR Engine:")
-        lbl.setStyleSheet(_FORM_LABEL_STYLE)
-        form.addRow(lbl, self._combo_engine)
-
         # TTS engine
         self._combo_tts = QComboBox()
         self._combo_tts.setStyleSheet(_COMBO_STYLE)
@@ -326,92 +302,6 @@ class MainWindow(QMainWindow):
         lbl = QLabel("TTS Voice:")
         lbl.setStyleSheet(_FORM_LABEL_STYLE)
         form.addRow(lbl, self._combo_tts)
-
-        parent.addWidget(group)
-
-    def _build_isolator_group(self, parent: QVBoxLayout, settings: AppSettings) -> None:
-        group = QGroupBox("Text Isolation")
-        form = QFormLayout(group)
-        form.setSpacing(8)
-        form.setContentsMargins(10, 14, 10, 10)
-        form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.ExpandingFieldsGrow)
-        form.setLabelAlignment(
-            Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
-        )
-
-        # Mode combo
-        self._combo_isolator = QComboBox()
-        self._combo_isolator.setStyleSheet(_COMBO_STYLE)
-        self._combo_isolator.addItem("Default (auto detect)", "default")
-        self._combo_isolator.addItem("Box Search (pick color)", "box_search")
-        for i in range(self._combo_isolator.count()):
-            if self._combo_isolator.itemData(i) == settings.isolator_mode:
-                self._combo_isolator.setCurrentIndex(i)
-                break
-        self._combo_isolator.currentIndexChanged.connect(self._on_isolator_mode_changed)
-        lbl = QLabel("Mode:")
-        lbl.setStyleSheet(_FORM_LABEL_STYLE)
-        form.addRow(lbl, self._combo_isolator)
-
-        # Color picker row: swatch + pick button + eyedropper button
-        color_row = QHBoxLayout()
-        color_row.setSpacing(6)
-
-        self._color_swatch = QLabel()
-        self._color_swatch.setFixedSize(24, 24)
-        self._color_swatch.setStyleSheet(
-            "QLabel { border: 2px solid #555; border-radius: 3px; }"
-        )
-        self._update_color_swatch(settings.box_color)
-        color_row.addWidget(self._color_swatch)
-
-        self._btn_pick_color = QPushButton("Pick Color")
-        self._btn_pick_color.setToolTip("Open a color dialog to choose the background color")
-        self._btn_pick_color.clicked.connect(self._on_pick_color_dialog)
-        color_row.addWidget(self._btn_pick_color)
-
-        self._btn_eyedropper = QPushButton("Eyedropper")
-        self._btn_eyedropper.setToolTip(
-            "Click on the capture preview to sample a color"
-        )
-        self._btn_eyedropper.setCheckable(True)
-        self._btn_eyedropper.clicked.connect(self._on_eyedropper_toggled)
-        color_row.addWidget(self._btn_eyedropper)
-        color_row.addStretch()
-
-        color_widget = QWidget()
-        color_widget.setLayout(color_row)
-        _lbl_color = QLabel("Box Color:")
-        _lbl_color.setStyleSheet(_FORM_LABEL_STYLE)
-        form.addRow(_lbl_color, color_widget)
-
-        # Tolerance slider
-        tol_row = QHBoxLayout()
-        tol_row.setSpacing(6)
-        self._slider_tolerance = QSlider(Qt.Orientation.Horizontal)
-        self._slider_tolerance.setRange(10, 150)
-        self._slider_tolerance.setSingleStep(5)
-        self._slider_tolerance.setValue(settings.box_color_tolerance)
-        self._slider_tolerance.valueChanged.connect(self._on_tolerance_changed)
-        tol_row.addWidget(self._slider_tolerance, stretch=1)
-        self._lbl_tolerance = QLabel(f"{settings.box_color_tolerance}")
-        self._lbl_tolerance.setFixedWidth(35)
-        self._lbl_tolerance.setAlignment(
-            Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
-        )
-        tol_row.addWidget(self._lbl_tolerance)
-
-        tol_widget = QWidget()
-        tol_widget.setLayout(tol_row)
-        _lbl_tol = QLabel("Tolerance:")
-        _lbl_tol.setStyleSheet(_FORM_LABEL_STYLE)
-        form.addRow(_lbl_tol, tol_widget)
-
-        # Show/hide box-search controls
-        self._box_search_widgets = [_lbl_color, color_widget, _lbl_tol, tol_widget]
-        is_box_mode = settings.isolator_mode == "box_search"
-        for w_ in self._box_search_widgets:
-            w_.setVisible(is_box_mode)
 
         parent.addWidget(group)
 
@@ -495,8 +385,8 @@ class MainWindow(QMainWindow):
 
         layout.addWidget(text_group)
 
-        # --- Raw Capture (for eyedropper + understanding what is captured) ---
-        raw_group = QGroupBox("Raw Capture (click to pick color)")
+        # --- Raw Capture ---
+        raw_group = QGroupBox("Raw Capture")
         raw_layout = QVBoxLayout(raw_group)
         raw_layout.setContentsMargins(6, 14, 6, 6)
 
@@ -512,8 +402,6 @@ class MainWindow(QMainWindow):
         self._raw_preview.setStyleSheet(
             "QLabel { background-color: #1a1a1a; color: #666; padding: 4px; }"
         )
-        # Eyedropper picks color from the RAW preview (not binarized)
-        self._raw_preview.mousePressEvent = self._preview_mouse_press
         self._raw_preview_scroll.setWidget(self._raw_preview)
 
         raw_layout.addWidget(self._raw_preview_scroll, stretch=1)
@@ -578,11 +466,6 @@ class MainWindow(QMainWindow):
         self.settings.language = lang
         self.language_changed.emit(lang)
 
-    def _on_engine_changed(self, index: int) -> None:
-        engine = self._combo_engine.itemData(index)
-        self.settings.ocr_engine = engine
-        self.ocr_engine_changed.emit(engine)
-
     def _on_tts_engine_changed(self, index: int) -> None:
         engine = self._combo_tts.itemData(index)
         self.settings.tts_engine = engine
@@ -608,110 +491,6 @@ class MainWindow(QMainWindow):
         self._lbl_interval.setText(f"{value} ms")
         self.settings.ocr_interval_ms = value
         self.interval_changed.emit(value)
-
-    # --- Isolator mode ---
-
-    def _on_isolator_mode_changed(self, index: int) -> None:
-        mode = self._combo_isolator.itemData(index)
-        self.settings.isolator_mode = mode
-        is_box = mode == "box_search"
-        for w_ in self._box_search_widgets:
-            w_.setVisible(is_box)
-        self.isolator_mode_changed.emit(mode)
-
-    def _update_color_swatch(self, color: tuple[int, int, int] | None) -> None:
-        """Update the color swatch label to show the current box color."""
-        if color is not None:
-            r, g, b = color
-            self._color_swatch.setStyleSheet(
-                f"QLabel {{ background-color: rgb({r},{g},{b}); "
-                f"border: 2px solid #555; border-radius: 3px; }}"
-            )
-            self._color_swatch.setToolTip(f"RGB({r}, {g}, {b})")
-        else:
-            self._color_swatch.setStyleSheet(
-                "QLabel { border: 2px solid #555; border-radius: 3px; "
-                "background-color: transparent; }"
-            )
-            self._color_swatch.setToolTip("No color selected")
-
-    def _on_pick_color_dialog(self) -> None:
-        """Open a QColorDialog to pick the box background color."""
-        initial = QColor(0, 0, 0)
-        if self.settings.box_color:
-            initial = QColor(*self.settings.box_color)
-        color = QColorDialog.getColor(initial, self, "Pick Subtitle Background Color")
-        if color.isValid():
-            rgb = (color.red(), color.green(), color.blue())
-            self._set_box_color(rgb)
-
-    def _on_eyedropper_toggled(self, checked: bool) -> None:
-        """Toggle eyedropper mode: next click on raw preview picks a color."""
-        self._eyedropper_active = checked
-        if checked:
-            self._btn_eyedropper.setStyleSheet(
-                "QPushButton { background-color: #ffcc00; font-weight: bold; }"
-            )
-            self._raw_preview.setCursor(Qt.CursorShape.CrossCursor)
-            self._status_bar.showMessage(
-                "Eyedropper active \u2014 click on the Raw Capture to pick a color"
-            )
-            # Switch to Output tab so user can click on the raw preview
-            self._tabs.setCurrentIndex(1)
-        else:
-            self._btn_eyedropper.setStyleSheet("")
-            self._raw_preview.setCursor(Qt.CursorShape.ArrowCursor)
-            self._status_bar.showMessage("Ready")
-
-    def _preview_mouse_press(self, event: QMouseEvent) -> None:
-        """Handle mouse clicks on the raw preview for eyedropper."""
-        if not self._eyedropper_active:
-            return
-        if self._raw_pixmap is None:
-            return
-
-        # Map click position to the original (unscaled) raw pixmap coordinates
-        click_x = event.position().x()
-        click_y = event.position().y()
-
-        displayed = self._raw_preview.pixmap()
-        if displayed is None:
-            return
-
-        # Scale click to raw pixmap coordinates
-        scale_x = self._raw_pixmap.width() / max(displayed.width(), 1)
-        scale_y = self._raw_pixmap.height() / max(displayed.height(), 1)
-        orig_x = int(click_x * scale_x)
-        orig_y = int(click_y * scale_y)
-
-        # Clamp to pixmap bounds
-        orig_x = max(0, min(orig_x, self._raw_pixmap.width() - 1))
-        orig_y = max(0, min(orig_y, self._raw_pixmap.height() - 1))
-
-        # Get the pixel color from the RAW pixmap (not the binarized preview)
-        img = self._raw_pixmap.toImage()
-        pixel = img.pixelColor(orig_x, orig_y)
-        rgb = (pixel.red(), pixel.green(), pixel.blue())
-
-        self._set_box_color(rgb)
-
-        # Deactivate eyedropper
-        self._btn_eyedropper.setChecked(False)
-        self._on_eyedropper_toggled(False)
-        self._status_bar.showMessage(
-            f"Color picked: RGB({rgb[0]}, {rgb[1]}, {rgb[2]})"
-        )
-
-    def _set_box_color(self, rgb: tuple[int, int, int]) -> None:
-        """Set box search color and update UI + settings."""
-        self.settings.box_color = rgb
-        self._update_color_swatch(rgb)
-        self.box_color_changed.emit(rgb)
-
-    def _on_tolerance_changed(self, value: int) -> None:
-        self._lbl_tolerance.setText(str(value))
-        self.settings.box_color_tolerance = value
-        self.box_color_tolerance_changed.emit(value)
 
     # ==================================================================
     # Public methods (called by app.py)
@@ -805,33 +584,6 @@ class MainWindow(QMainWindow):
 
     def show_error(self, message: str) -> None:
         self._status_bar.showMessage(f"Error: {message}")
-
-    def revert_ocr_engine(self, failed_engine: str, error_msg: str) -> None:
-        """Revert OCR engine combo box and show error dialog."""
-        actual_engine = self.settings.ocr_engine
-        if actual_engine == failed_engine:
-            actual_engine = "tesseract"
-            self.settings.ocr_engine = actual_engine
-
-        self._combo_engine.blockSignals(True)
-        for i in range(self._combo_engine.count()):
-            if self._combo_engine.itemData(i) == actual_engine:
-                self._combo_engine.setCurrentIndex(i)
-                break
-        self._combo_engine.blockSignals(False)
-
-        engine_names = {"easyocr": "EasyOCR", "tesseract": "Tesseract"}
-        display_name = engine_names.get(failed_engine, failed_engine)
-
-        QMessageBox.warning(
-            self,
-            "OCR Engine Unavailable",
-            f"Failed to load <b>{display_name}</b> engine.\n\n"
-            f"Error: {error_msg}\n\n"
-            f"Install the required packages or choose a different engine.\n\n"
-            f"For EasyOCR:\n"
-            f"  uv pip install easyocr torch",
-        )
 
     def revert_tts_engine(self, failed_engine: str, error_msg: str) -> None:
         """Revert TTS engine combo box and show error dialog."""
