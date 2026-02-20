@@ -12,7 +12,8 @@ from __future__ import annotations
 
 import re
 import time
-from collections import Counter
+import unicodedata
+from collections import Counter, deque
 
 
 # ---------------------------------------------------------------------------
@@ -21,7 +22,7 @@ from collections import Counter
 
 # Default similarity threshold for deduplication.
 # Texts with max(metrics) >= this value are considered "the same".
-DEFAULT_SIMILARITY_THRESHOLD = 0.75
+DEFAULT_SIMILARITY_THRESHOLD = 0.85
 
 # Threshold for very short strings (< 5 chars) -- exact match only.
 SHORT_STRING_LENGTH = 5
@@ -37,6 +38,22 @@ def _clean(text: str) -> str:
     """Normalize text for comparison: collapse whitespace, strip OCR artifacts."""
     # Remove OCR cursor/boundary artifacts: |, ], [, ), \, }
     text = re.sub(r"[\|\]\[\)\\\}]+", "", text)
+    return " ".join(text.split())
+
+
+_RE_NON_ALNUM = re.compile(r"[^\w\s]", re.UNICODE)
+
+
+def _normalize_for_compare(text: str) -> str:
+    """Aggressively normalize text for deduplication comparison only.
+
+    Strips ALL punctuation, lowercases, applies NFKC unicode normalization,
+    and collapses whitespace. Never used for output — only for equality
+    and similarity checks against previously spoken text.
+    """
+    text = unicodedata.normalize("NFKC", text)
+    text = _RE_NON_ALNUM.sub("", text)
+    text = text.lower()
     return " ".join(text.split())
 
 
@@ -299,6 +316,7 @@ class TextDiffer:
         settle_time_ms: int = 300,
     ):
         self._last_spoken: str = ""
+        self._spoken_history: deque[str] = deque(maxlen=5)
         self._threshold = similarity_threshold
 
         # Stabilization state for growing text (time-based)
@@ -306,9 +324,33 @@ class TextDiffer:
         self._pending_text: str | None = None
         self._last_change_time: float | None = None
 
+        # Post-speech cooldown: suppress similar texts shortly after emission
+        self._last_emit_time: float = 0.0
+        self._cooldown_ms: int = 2000
+
     def set_settle_time(self, ms: int) -> None:
         """Update settle time (called when user changes the setting)."""
         self._settle_time_ms = ms
+
+    def _is_in_history(self, text: str) -> bool:
+        """Check if normalized text matches any recently spoken text."""
+        norm = _normalize_for_compare(text)
+        if not norm:
+            return False
+        for hist_norm in self._spoken_history:
+            if norm == hist_norm:
+                return True
+            if is_text_similar(norm, hist_norm, self._threshold):
+                return True
+        return False
+
+    def _record_spoken(self, text: str) -> None:
+        """Record text as spoken: update last_spoken, history, and cooldown."""
+        self._last_spoken = text
+        norm = _normalize_for_compare(text)
+        if norm:
+            self._spoken_history.append(norm)
+        self._last_emit_time = time.monotonic()
 
     def _is_growth(self, old_text: str, new_text: str) -> bool:
         """Check if new_text is old_text with more content appended.
@@ -360,17 +402,17 @@ class TextDiffer:
 
         if not self._last_spoken:
             # First text ever -- emit immediately
-            self._last_spoken = current_text
+            self._record_spoken(current_text)
             self._clear_pending()
             return current_text
 
         # --- If we have pending (buffered growing) text, compare against it ---
         if self._pending_text is not None:
-            clean_new = _clean(current_text)
-            clean_pending = _clean(self._pending_text)
+            norm_new = _normalize_for_compare(current_text)
+            norm_pending = _normalize_for_compare(self._pending_text)
 
-            # Exact match (cleaned) -- check settle time
-            if clean_new == clean_pending:
+            # Exact match (normalized) -- check settle time
+            if norm_new == norm_pending:
                 self._pending_text = current_text
                 if self._is_settled():
                     return self._flush_pending()
@@ -384,6 +426,8 @@ class TextDiffer:
                 return None
 
             # New is a subset of pending -- partial OCR, keep waiting
+            clean_new = _clean(current_text)
+            clean_pending = _clean(self._pending_text)
             if clean_new in clean_pending:
                 return None
 
@@ -403,14 +447,20 @@ class TextDiffer:
                 return flushed
 
         # --- Normal comparison against last spoken text ---
-        clean_spoken = _clean(self._last_spoken)
-        clean_new = _clean(current_text)
+        norm_spoken = _normalize_for_compare(self._last_spoken)
+        norm_new = _normalize_for_compare(current_text)
 
-        # Exact match -- skip
-        if clean_spoken == clean_new:
+        # Stage 1: fast exact match on aggressively normalized text
+        if norm_spoken == norm_new:
+            return None
+
+        # Check against full history (catches A->B->A cycling)
+        if self._is_in_history(current_text):
             return None
 
         # New is a subset of spoken -- partial OCR of same subtitle
+        clean_spoken = _clean(self._last_spoken)
+        clean_new = _clean(current_text)
         if clean_new in clean_spoken:
             return None
 
@@ -438,12 +488,17 @@ class TextDiffer:
                 self._mark_changed()
                 return None
 
-        # High similarity = OCR jitter, not a real change
-        if is_text_similar(clean_spoken, clean_new, self._threshold):
+        # Stage 2: similarity check with cooldown-aware threshold
+        effective_threshold = self._threshold
+        elapsed_since_emit = (time.monotonic() - self._last_emit_time) * 1000
+        if elapsed_since_emit < self._cooldown_ms:
+            effective_threshold = max(0.65, self._threshold - 0.15)
+
+        if is_text_similar(norm_spoken, norm_new, effective_threshold):
             return None
 
         # Text changed substantially -- completely new subtitle
-        self._last_spoken = current_text
+        self._record_spoken(current_text)
         self._clear_pending()
         return current_text
 
@@ -465,7 +520,7 @@ class TextDiffer:
         clean_pending = _clean(pending)
 
         # Update state: pending becomes the new "last spoken"
-        self._last_spoken = pending
+        self._record_spoken(pending)
         self._clear_pending()
 
         # Case 1: within-line growth -- old is a prefix of pending (cleaned)
@@ -519,4 +574,6 @@ class TextDiffer:
     def reset(self) -> None:
         """Reset all state (used when region changes or reading restarts)."""
         self._last_spoken = ""
+        self._spoken_history.clear()
+        self._last_emit_time = 0.0
         self._clear_pending()
