@@ -41,6 +41,23 @@ MIN_HEIGHT = 100
 _TESSERACT_CONFIG = "--psm 6 --oem 1"
 
 
+def _tesseract_lang(settings_lang: str) -> str:
+    """Map UI language setting to the Tesseract language code.
+
+    For "rus" mode we still feed Tesseract eng+rus so that English words
+    (brand names, technical terms, game UI) embedded in Russian subtitles
+    are recognised correctly instead of being mangled into look-alike
+    Cyrillic letters.  The filter_by_language() step applied AFTER OCR
+    still enforces the Russian-only rule, so English-only lines are dropped.
+
+    For "eng" mode only English is expected, so we keep it as-is to avoid
+    Tesseract second-guessing Latin characters as Cyrillic.
+    """
+    if settings_lang == "rus":
+        return "eng+rus"
+    return settings_lang  # "eng" or "eng+rus" pass through unchanged
+
+
 def _recognize(image: Image.Image, language: str) -> str:
     """Run Tesseract OCR on a PIL image.
 
@@ -207,16 +224,16 @@ class OcrWorker(QThread):
         Called before start() or when settings change while running.
         """
         self._region = region
-        self._language = language
+        self._language = _tesseract_lang(language)
         self._interval_ms = interval_ms
         self._capture_count = 0
         logger.info(
-            "OCR configured: region=(%d,%d,%d,%d), lang=%s",
-            *region, language,
+            "OCR configured: region=(%d,%d,%d,%d), lang=%s (tesseract: %s)",
+            *region, language, self._language,
         )
 
     def set_language(self, language: str) -> None:
-        self._language = language
+        self._language = _tesseract_lang(language)
 
     def set_interval(self, interval_ms: int) -> None:
         self._interval_ms = interval_ms
