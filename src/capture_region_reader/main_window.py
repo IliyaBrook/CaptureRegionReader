@@ -25,7 +25,7 @@ from PyQt6.QtWidgets import (
 
 from pathlib import Path
 
-from capture_region_reader.settings import AppSettings
+from capture_region_reader.settings import AppSettings, CaptureZone
 
 # Icon path: assets/icon.png relative to project root
 _ICON_PATH = Path(__file__).resolve().parent.parent.parent / "assets" / "icon.png"
@@ -100,6 +100,100 @@ class HotkeyRecorder(QLineEdit):
         self.hotkey_recorded.emit(combo)
 
 
+class ZoneRowWidget(QWidget):
+    """Single custom zone row: name, hotkey, activate, select region, delete."""
+
+    activated = pyqtSignal(int)
+    select_region = pyqtSignal(int)
+    deleted = pyqtSignal(int)
+    hotkey_changed = pyqtSignal(int, str)
+    name_changed = pyqtSignal(int, str)
+
+    def __init__(self, index: int, zone: CaptureZone, is_active: bool) -> None:
+        super().__init__()
+        self._index = index
+
+        row = QHBoxLayout(self)
+        row.setContentsMargins(4, 2, 4, 2)
+        row.setSpacing(4)
+
+        # Name
+        self._name_edit = QLineEdit(zone.name)
+        self._name_edit.setMaxLength(20)
+        self._name_edit.setFixedWidth(90)
+        self._name_edit.setPlaceholderText("Zone name")
+        self._name_edit.editingFinished.connect(self._on_name_changed)
+        row.addWidget(self._name_edit)
+
+        # Hotkey
+        self._hotkey_edit = HotkeyRecorder(zone.hotkey)
+        self._hotkey_edit.setFixedWidth(120)
+        self._hotkey_edit.setPlaceholderText("No hotkey")
+        self._hotkey_edit.hotkey_recorded.connect(self._on_hotkey_recorded)
+        row.addWidget(self._hotkey_edit)
+
+        btn_record = QPushButton("Rec")
+        btn_record.setFixedWidth(36)
+        btn_record.setToolTip("Record hotkey")
+        btn_record.clicked.connect(self._hotkey_edit.start_recording)
+        row.addWidget(btn_record)
+
+        # Activate
+        self._btn_activate = QPushButton("Activate")
+        self._btn_activate.setFixedWidth(64)
+        self._btn_activate.setEnabled(zone.region is not None)
+        self._btn_activate.clicked.connect(lambda: self.activated.emit(self._index))
+        row.addWidget(self._btn_activate)
+
+        # Select Region
+        btn_select = QPushButton("Select")
+        btn_select.setFixedWidth(50)
+        btn_select.setToolTip("Select capture region for this zone")
+        btn_select.clicked.connect(lambda: self.select_region.emit(self._index))
+        row.addWidget(btn_select)
+
+        # Region info label
+        self._lbl_region = QLabel()
+        self._lbl_region.setStyleSheet("QLabel { color: #888; font-size: 11px; }")
+        self._lbl_region.setFixedWidth(100)
+        if zone.region:
+            l, t, w, h = zone.region
+            self._lbl_region.setText(f"{w}\u00d7{h}")
+        else:
+            self._lbl_region.setText("no region")
+        row.addWidget(self._lbl_region)
+
+        # Delete
+        btn_delete = QPushButton("\u2715")
+        btn_delete.setFixedWidth(28)
+        btn_delete.setToolTip("Delete zone")
+        btn_delete.setStyleSheet(
+            "QPushButton { color: #cc3333; font-weight: bold; }"
+            "QPushButton:hover { background-color: #cc3333; color: white; }"
+        )
+        btn_delete.clicked.connect(lambda: self.deleted.emit(self._index))
+        row.addWidget(btn_delete)
+
+        self._apply_active_style(is_active)
+
+    def set_index(self, index: int) -> None:
+        self._index = index
+
+    def _apply_active_style(self, is_active: bool) -> None:
+        if is_active:
+            self._btn_activate.setStyleSheet(
+                "QPushButton { background-color: #2a7d2a; color: white; font-weight: bold; }"
+            )
+        else:
+            self._btn_activate.setStyleSheet("")
+
+    def _on_name_changed(self) -> None:
+        self.name_changed.emit(self._index, self._name_edit.text())
+
+    def _on_hotkey_recorded(self, combo: str) -> None:
+        self.hotkey_changed.emit(self._index, combo)
+
+
 class MainWindow(QMainWindow):
     select_region_clicked = pyqtSignal()
     show_region_toggled = pyqtSignal(bool)
@@ -113,6 +207,14 @@ class MainWindow(QMainWindow):
     tts_engine_changed = pyqtSignal(str)
     growing_subtitles_changed = pyqtSignal(bool)
 
+    # Zone signals
+    zone_added = pyqtSignal()
+    zone_deleted = pyqtSignal(int)
+    zone_activated = pyqtSignal(int)
+    zone_select_region = pyqtSignal(int)
+    zone_hotkey_changed = pyqtSignal(int, str)
+    zone_name_changed = pyqtSignal(int, str)
+
     def __init__(self, settings: AppSettings) -> None:
         super().__init__()
         self.settings = settings
@@ -120,6 +222,7 @@ class MainWindow(QMainWindow):
         self._preview_fit_mode = True
         self._preview_original_pixmap: QPixmap | None = None
         self._raw_pixmap: QPixmap | None = None
+        self._zone_rows: list[ZoneRowWidget] = []
 
         self.setWindowTitle("CaptureRegionReader")
         if _ICON_PATH.exists():
@@ -140,10 +243,13 @@ class MainWindow(QMainWindow):
         self._tabs.setDocumentMode(True)
         root_layout.addWidget(self._tabs, stretch=1)
 
-        # Tab 1: Settings
+        # Tab 1: Settings (Language & Engine, Timing & Audio)
         self._tabs.addTab(self._build_settings_tab(settings), "Settings")
 
-        # Tab 2: Output (Recognized Text + Capture Preview)
+        # Tab 2: Hotkeys (global hotkeys + custom zones)
+        self._tabs.addTab(self._build_hotkeys_tab(settings), "Hotkeys")
+
+        # Tab 3: Output (Recognized Text + Capture Preview)
         self._tabs.addTab(self._build_output_tab(settings), "Output")
 
         # --- Status bar ---
@@ -214,13 +320,12 @@ class MainWindow(QMainWindow):
         parent_layout.addWidget(top)
 
     # ------------------------------------------------------------------
-    # Tab 1: Settings
+    # Tab 1: Settings (no hotkeys — moved to Hotkeys tab)
     # ------------------------------------------------------------------
 
     def _build_settings_tab(self, settings: AppSettings) -> QWidget:
-        """Build the Settings tab containing all configuration controls."""
+        """Build the Settings tab containing configuration controls."""
         tab = QWidget()
-        # Wrap in a scroll area so everything is accessible even at small sizes
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(QScrollArea.Shape.NoFrame)
@@ -229,9 +334,6 @@ class MainWindow(QMainWindow):
         layout = QVBoxLayout(content)
         layout.setSpacing(8)
         layout.setContentsMargins(4, 4, 4, 4)
-
-        # --- Hotkeys ---
-        self._build_hotkeys_group(layout, settings)
 
         # --- Language / OCR / TTS ---
         self._build_engines_group(layout, settings)
@@ -247,8 +349,38 @@ class MainWindow(QMainWindow):
         tab_layout.addWidget(scroll)
         return tab
 
+    # ------------------------------------------------------------------
+    # Tab 2: Hotkeys (global hotkeys + custom zones)
+    # ------------------------------------------------------------------
+
+    def _build_hotkeys_tab(self, settings: AppSettings) -> QWidget:
+        """Build the Hotkeys tab with global hotkeys and custom zones."""
+        tab = QWidget()
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QScrollArea.Shape.NoFrame)
+
+        content = QWidget()
+        layout = QVBoxLayout(content)
+        layout.setSpacing(8)
+        layout.setContentsMargins(4, 4, 4, 4)
+
+        # --- Global Hotkeys ---
+        self._build_hotkeys_group(layout, settings)
+
+        # --- Custom Zones ---
+        self._build_zones_group(layout, settings)
+
+        layout.addStretch()
+        scroll.setWidget(content)
+
+        tab_layout = QVBoxLayout(tab)
+        tab_layout.setContentsMargins(0, 0, 0, 0)
+        tab_layout.addWidget(scroll)
+        return tab
+
     def _build_hotkeys_group(self, parent: QVBoxLayout, settings: AppSettings) -> None:
-        group = QGroupBox("Hotkeys")
+        group = QGroupBox("Global Hotkeys")
         vbox = QVBoxLayout(group)
         vbox.setSpacing(6)
         vbox.setContentsMargins(10, 14, 10, 10)
@@ -276,6 +408,38 @@ class MainWindow(QMainWindow):
         vbox.addLayout(region_hotkey_row)
 
         parent.addWidget(group)
+
+    def _build_zones_group(self, parent: QVBoxLayout, settings: AppSettings) -> None:
+        group = QGroupBox("Custom Zones")
+        vbox = QVBoxLayout(group)
+        vbox.setSpacing(6)
+        vbox.setContentsMargins(10, 14, 10, 10)
+
+        # Add zone button
+        btn_row = QHBoxLayout()
+        btn_row.addStretch()
+        btn_add = QPushButton("+ Add Zone")
+        btn_add.setStyleSheet("QPushButton { font-weight: bold; }")
+        btn_add.clicked.connect(self.zone_added.emit)
+        btn_row.addWidget(btn_add)
+        vbox.addLayout(btn_row)
+
+        # Container for zone rows
+        self._zones_container = QVBoxLayout()
+        self._zones_container.setSpacing(2)
+        vbox.addLayout(self._zones_container)
+
+        # Hint
+        hint = QLabel("Assign hotkeys to zones for instant switching during gameplay.")
+        hint.setStyleSheet("QLabel { color: #888; font-size: 11px; }")
+        hint.setWordWrap(True)
+        vbox.addWidget(hint)
+
+        parent.addWidget(group)
+
+    # ------------------------------------------------------------------
+    # Settings tab groups
+    # ------------------------------------------------------------------
 
     def _build_engines_group(self, parent: QVBoxLayout, settings: AppSettings) -> None:
         group = QGroupBox("Language && Engine")
@@ -388,7 +552,7 @@ class MainWindow(QMainWindow):
         parent.addWidget(group)
 
     # ------------------------------------------------------------------
-    # Tab 2: Output (Recognized Text + Capture Preview)
+    # Tab 3: Output (Recognized Text + Capture Preview)
     # ------------------------------------------------------------------
 
     def _build_output_tab(self, settings: AppSettings) -> QWidget:
@@ -533,6 +697,46 @@ class MainWindow(QMainWindow):
         self._lbl_interval.setText(f"{value} ms")
         self.settings.ocr_interval_ms = value
         self.interval_changed.emit(value)
+
+    # ==================================================================
+    # Zone management (public methods called by app.py)
+    # ==================================================================
+
+    def rebuild_zones(
+        self, zones: list[CaptureZone], active_index: int | None
+    ) -> None:
+        """Rebuild all zone row widgets from the zones list."""
+        # Clear existing rows
+        for row in self._zone_rows:
+            self._zones_container.removeWidget(row)
+            row.deleteLater()
+        self._zone_rows.clear()
+
+        # Create new rows
+        for i, zone in enumerate(zones):
+            is_active = (active_index == i)
+            row = ZoneRowWidget(i, zone, is_active)
+            row.activated.connect(self.zone_activated.emit)
+            row.select_region.connect(self.zone_select_region.emit)
+            row.deleted.connect(self.zone_deleted.emit)
+            row.hotkey_changed.connect(self.zone_hotkey_changed.emit)
+            row.name_changed.connect(self.zone_name_changed.emit)
+            self._zones_container.addWidget(row)
+            self._zone_rows.append(row)
+
+    def update_region_display(
+        self,
+        region: tuple[int, int, int, int],
+        zone_name: str | None = None,
+    ) -> None:
+        """Update the region label in the top bar, optionally with zone name."""
+        l, t, w, h = region
+        if zone_name:
+            self._lbl_region.setText(f'"{zone_name}" ({l}, {t}) {w}\u00d7{h}')
+        else:
+            self._lbl_region.setText(f"({l}, {t}) {w}\u00d7{h}")
+        self._btn_toggle.setEnabled(True)
+        self._btn_show_region.setEnabled(True)
 
     # ==================================================================
     # Public methods (called by app.py)

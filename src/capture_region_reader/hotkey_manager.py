@@ -34,12 +34,14 @@ def qt_hotkey_to_pynput(hotkey_str: str) -> str:
 class HotkeyManager(QObject):
     hotkey_triggered = pyqtSignal()
     select_region_triggered = pyqtSignal()
+    zone_hotkey_triggered = pyqtSignal(int)  # emits zone index
 
     def __init__(self) -> None:
         super().__init__()
         self._listener: keyboard.GlobalHotKeys | None = None
         self._toggle_hotkey: str = ""
         self._select_region_hotkey: str = ""
+        self._zone_hotkeys: dict[int, str] = {}  # zone_index -> qt_hotkey_str
 
     def set_hotkey(self, hotkey_str: str) -> None:
         """Set the toggle start/stop hotkey from Qt-style string."""
@@ -49,6 +51,11 @@ class HotkeyManager(QObject):
     def set_select_region_hotkey(self, hotkey_str: str) -> None:
         """Set the select region hotkey from Qt-style string."""
         self._select_region_hotkey = hotkey_str
+        self._restart_listener()
+
+    def set_zone_hotkeys(self, zone_hotkeys: dict[int, str]) -> None:
+        """Set all zone activation hotkeys. zone_hotkeys: {index: qt_hotkey_str}."""
+        self._zone_hotkeys = {k: v for k, v in zone_hotkeys.items() if v}
         self._restart_listener()
 
     def _restart_listener(self) -> None:
@@ -73,6 +80,13 @@ class HotkeyManager(QObject):
             except Exception:
                 pass
 
+        for zone_idx, qt_str in self._zone_hotkeys.items():
+            try:
+                pynput_str = qt_hotkey_to_pynput(qt_str)
+                hotkeys[pynput_str] = lambda idx=zone_idx: self._on_zone(idx)
+            except Exception:
+                pass
+
         if not hotkeys:
             return
 
@@ -93,3 +107,6 @@ class HotkeyManager(QObject):
 
     def _on_select_region(self) -> None:
         self.select_region_triggered.emit()
+
+    def _on_zone(self, zone_index: int) -> None:
+        self.zone_hotkey_triggered.emit(zone_index)
