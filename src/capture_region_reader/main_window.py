@@ -325,6 +325,16 @@ class MainWindow(QMainWindow):
             row.addWidget(value_label)
             return row
 
+        # Settle time hint
+        settle_hint = QLabel(
+            "Wait for subtitles that appear gradually (typing effect).\n"
+            "Set to 0 if subtitles appear all at once."
+        )
+        settle_hint.setStyleSheet("QLabel { color: #888; font-size: 11px; }")
+        settle_hint.setWordWrap(True)
+        settle_hint.setContentsMargins(0, 2, 0, 2)
+        vbox.addWidget(settle_hint)
+
         # Settle time
         self._slider_settle = QSlider(Qt.Orientation.Horizontal)
         self._slider_settle.setRange(0, 2000)
