@@ -14,7 +14,6 @@ and change detection are handled by TextDiffer in the app layer.
 from __future__ import annotations
 
 import logging
-import os
 import time
 
 import numpy as np
@@ -33,11 +32,6 @@ logger = logging.getLogger(__name__)
 # Small capture regions produce blurry characters after Otsu thresholding.
 MIN_WIDTH = 600
 MIN_HEIGHT = 100
-
-
-# Debug: save captures to .tests/debug/ for inspection.
-DEBUG_SAVE = os.environ.get("CRR_DEBUG", "0") == "1"
-_DEBUG_DIR = os.path.join(os.path.dirname(__file__), "..", "..", ".tests", "debug")
 
 
 # ---------------------------------------------------------------------------
@@ -274,12 +268,6 @@ class OcrWorker(QThread):
                 "falling back to raw image for OCR",
                 self._capture_count, raw_rgb.shape,
             )
-            # Debug: save the input that caused None
-            if DEBUG_SAVE and self._capture_count < 20:
-                os.makedirs(_DEBUG_DIR, exist_ok=True)
-                Image.fromarray(raw_rgb).save(
-                    os.path.join(_DEBUG_DIR, f"crr_none_input_{self._capture_count}.png")
-                )
             # Fallback: use raw image directly for OCR (e.g. black text on white)
             ocr_img = _upscale(Image.fromarray(raw_rgb))
             # Show raw as the processed preview (no isolation was applied)
@@ -291,20 +279,6 @@ class OcrWorker(QThread):
             preview_rgb = np.array(ocr_img)
             p_h, p_w = preview_rgb.shape[:2]
             self.frame_captured.emit(preview_rgb.tobytes(), p_w, p_h)
-
-        # Debug saves
-        if DEBUG_SAVE and self._capture_count < 20:
-            os.makedirs(_DEBUG_DIR, exist_ok=True)
-            Image.fromarray(raw_rgb).save(
-                os.path.join(_DEBUG_DIR, f"crr_raw_{self._capture_count}.png")
-            )
-            ocr_img.save(
-                os.path.join(_DEBUG_DIR, f"crr_isolated_{self._capture_count}.png")
-            )
-            logger.info(
-                "Debug frame %d saved: raw=%s, isolated=%s",
-                self._capture_count, raw_rgb.shape, ocr_img.size,
-            )
 
         self._capture_count += 1
 

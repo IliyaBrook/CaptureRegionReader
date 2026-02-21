@@ -6,6 +6,7 @@ import numpy as np
 from mss import mss
 from PyQt6.QtWidgets import QApplication
 
+from capture_region_reader.debug_service import DebugService, is_debug_enabled
 from capture_region_reader.hotkey_manager import HotkeyManager
 from capture_region_reader.main_window import MainWindow
 from capture_region_reader.ocr_worker import OcrWorker
@@ -23,6 +24,10 @@ class App:
         self._qt_app.setOrganizationName("CaptureRegionReader")
 
         self._settings = AppSettings.load()
+
+        self._debug: DebugService | None = None
+        if is_debug_enabled():
+            self._debug = DebugService()
 
         # Workers
         self._ocr_worker = OcrWorker()
@@ -59,6 +64,11 @@ class App:
         self._ocr_worker.frame_captured.connect(w.update_capture_preview)
         self._ocr_worker.raw_frame_captured.connect(w.update_raw_preview)
         self._ocr_worker.error_occurred.connect(w.show_error)
+
+        # Debug: cache frames for per-subtitle artifact saving
+        if self._debug:
+            self._ocr_worker.raw_frame_captured.connect(self._debug.cache_raw_frame)
+            self._ocr_worker.frame_captured.connect(self._debug.cache_processed_frame)
 
         # TTS status
         self._tts_worker.speech_started.connect(
@@ -250,19 +260,35 @@ class App:
         self._window.show_status("Stopped")
 
     def _on_text_recognized(self, text: str) -> None:
+        d = self._debug
+
         # Apply language filter first (removes lines with wrong language)
-        text = filter_by_language(text, self._settings.language)
+        filtered = filter_by_language(text, self._settings.language)
+
+        if d and text:
+            d.log("OCR RAW", repr(text))
+            if filtered != text:
+                d.log("LANG FILTER", repr(filtered))
 
         # Update display only when there's actual text (avoid flickering)
-        if text:
-            self._window.update_text_display(text)
+        if filtered:
+            self._window.update_text_display(filtered)
 
-        new_text = self._text_differ.get_new_text(text)
+        new_text = self._text_differ.get_new_text(filtered)
         if new_text:
+            if d:
+                d.log("DIFFER NEW", repr(new_text))
             # Clean text for natural TTS reading (remove symbols, OCR artifacts)
             cleaned = clean_for_tts(new_text)
             if cleaned:
+                if d:
+                    d.log("TTS SPEAK", repr(cleaned))
+                    d.save_subtitle(cleaned)
                 self._tts_worker.speak(cleaned)
+            elif d:
+                d.log("TTS SKIP", "clean_for_tts returned empty")
+        elif d and filtered:
+            d.log("DIFFER SKIP", "duplicate/similar, not speaking")
 
     def _on_language_changed(self, lang: str) -> None:
         self._ocr_worker.set_language(lang)
@@ -277,6 +303,9 @@ class App:
         self._tts_worker.shutdown()
         self._hotkey_manager.stop()
         self._settings.save()
+
+        if self._debug:
+            self._debug.shutdown()
 
         return exit_code
 
