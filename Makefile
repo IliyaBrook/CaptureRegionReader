@@ -6,6 +6,7 @@ setup: check-deps check-venv
 check-deps:
 	@which tesseract > /dev/null 2>&1 || (echo "ERROR: tesseract not found. Install with: sudo apt install tesseract-ocr tesseract-ocr-eng tesseract-ocr-rus" && exit 1)
 	@which ffplay > /dev/null 2>&1 || (echo "ERROR: ffplay not found. Install with: sudo apt install ffmpeg" && exit 1)
+	@which ffmpeg > /dev/null 2>&1 || (echo "ERROR: ffmpeg not found. Install with: sudo apt install ffmpeg" && exit 1)
 	@echo "All system dependencies OK"
 
 check-venv:
@@ -18,6 +19,12 @@ check-venv:
 			rm -rf .venv; \
 		elif ! uv run python -c "import numpy" > /dev/null 2>&1; then \
 			echo "WARNING: Broken venv detected (numpy missing). Recreating..."; \
+			rm -rf .venv; \
+		elif ! uv run python -c "import torchaudio" > /dev/null 2>&1; then \
+			echo "WARNING: Broken venv detected (torchaudio missing). Recreating..."; \
+			rm -rf .venv; \
+		elif ! uv run python -c "import torch; import transformers.pytorch_utils as p; p.isin_mps_friendly=torch.isin if not hasattr(p,'isin_mps_friendly') else p.isin_mps_friendly; from TTS.api import TTS" > /dev/null 2>&1; then \
+			echo "WARNING: Broken venv detected (coqui-tts missing). Recreating..."; \
 			rm -rf .venv; \
 		fi; \
 	fi
