@@ -32,7 +32,7 @@ class App:
 
         # UI
         self._window = MainWindow(self._settings)
-        self._region_selector: RegionSelector | None = None
+        self._region_selectors: list[RegionSelector] = []
         self._region_overlay = RegionOverlay()
 
         self._is_reading = False
@@ -106,15 +106,69 @@ class App:
         if was_reading:
             self._stop_reading()
 
-        self._region_selector = RegionSelector()
-        self._region_selector.region_selected.connect(
-            lambda l, t, w, h: self._on_region_selected(l, t, w, h, was_reading)
-        )
-        self._region_selector.showFullScreen()
+        self._close_all_selectors()
+
+        # Capture full virtual desktop BEFORE showing overlays (mss reads
+        # the X11 framebuffer directly, so fullscreen games are captured).
+        from PyQt6.QtGui import QImage, QPixmap
+
+        full_pixmap: QPixmap | None = None
+        desktop_left = 0
+        desktop_top = 0
+        try:
+            with mss() as sct:
+                desktop = sct.monitors[0]  # full virtual desktop
+                desktop_left = desktop["left"]
+                desktop_top = desktop["top"]
+                screenshot = sct.grab(desktop)
+                w, h = screenshot.size
+                raw_rgb = screenshot.rgb
+                qimage = QImage(
+                    raw_rgb, w, h, w * 3, QImage.Format.Format_RGB888,
+                )
+                full_pixmap = QPixmap.fromImage(qimage)
+        except Exception:
+            pass
+
+        # Create one selector window per screen (Spectacle approach).
+        # Each gets a cropped portion of the desktop screenshot matching
+        # its physical pixel area — no cross-screen coordinate issues.
+        screens = self._qt_app.screens()
+        for screen in screens:
+            screen_bg: QPixmap | None = None
+            if full_pixmap:
+                geo = screen.geometry()
+                dpr = screen.devicePixelRatio()
+                # geo.x()/y() are PHYSICAL on X11; size is LOGICAL
+                crop_x = int(geo.x() - desktop_left)
+                crop_y = int(geo.y() - desktop_top)
+                phys_w = int(geo.width() * dpr)
+                phys_h = int(geo.height() * dpr)
+                screen_bg = full_pixmap.copy(crop_x, crop_y, phys_w, phys_h)
+
+            selector = RegionSelector(screen=screen, background=screen_bg)
+            selector.region_selected.connect(
+                lambda l, t, w, h, _r=was_reading: self._on_region_selected(
+                    l, t, w, h, _r,
+                )
+            )
+            selector.cancelled.connect(self._close_all_selectors)
+            self._region_selectors.append(selector)
+
+        for selector in self._region_selectors:
+            selector.show()
+            selector.raise_()
+
+    def _close_all_selectors(self) -> None:
+        """Close every per-screen selector window."""
+        for s in self._region_selectors:
+            s.close()
+        self._region_selectors.clear()
 
     def _on_region_selected(
         self, left: int, top: int, width: int, height: int, restart: bool
     ) -> None:
+        self._close_all_selectors()
         self._window.on_region_selected(left, top, width, height)
         self._text_differ.reset()
         self._grab_single_preview(left, top, width, height)

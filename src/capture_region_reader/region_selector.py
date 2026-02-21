@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-from PyQt6.QtCore import Qt, pyqtSignal, QPoint, QRect
-from PyQt6.QtGui import QPainter, QColor, QPen, QGuiApplication
+from PyQt6.QtCore import Qt, QRectF, pyqtSignal, QPoint, QRect
+from PyQt6.QtGui import QPainter, QPainterPath, QColor, QPen, QGuiApplication, QPixmap
 from PyQt6.QtWidgets import QWidget
 
 
@@ -93,6 +93,13 @@ class RegionOverlay(QWidget):
     def paintEvent(self, event) -> None:
         painter = QPainter(self)
         b = self._border
+        # Semi-transparent interior so the region is visible even over
+        # fullscreen apps where the compositor can't show true transparency
+        painter.fillRect(
+            b, b, self.width() - 2 * b, self.height() - 2 * b,
+            QColor(0, 200, 0, 18),
+        )
+        # Green border
         pen = QPen(QColor(0, 200, 0), b)
         painter.setPen(pen)
         painter.setBrush(Qt.BrushStyle.NoBrush)
@@ -102,25 +109,33 @@ class RegionOverlay(QWidget):
 
 
 class RegionSelector(QWidget):
+    """Per-screen overlay for region selection.
+
+    Following the Spectacle (KDE) approach: one window per QScreen,
+    each with its own cropped desktop screenshot as background.
+    This avoids coordinate-mapping issues on multi-monitor setups and
+    prevents fullscreen apps from going black.
+    """
+
     # Signal emits PHYSICAL pixel coordinates for mss
     region_selected = pyqtSignal(int, int, int, int)  # left, top, width, height
+    cancelled = pyqtSignal()  # Escape or invalid click — close all sibling windows
 
-    def __init__(self) -> None:
+    def __init__(self, screen: QScreen | None = None, background: QPixmap | None = None) -> None:  # noqa: F821
         super().__init__()
         self._start_pos: QPoint | None = None
         self._current_pos: QPoint | None = None
+        self._background = background  # cropped screenshot for THIS screen
 
-        # Compute virtual desktop geometry spanning all monitors
-        # Qt reports this in its mixed coordinate space
-        screens = QGuiApplication.screens()
-        if screens:
-            combined = screens[0].geometry()
-            for screen in screens[1:]:
-                combined = combined.united(screen.geometry())
+        if screen:
+            self.setGeometry(screen.geometry())
         else:
-            combined = QRect(0, 0, 1920, 1080)
-
-        self.setGeometry(combined)
+            # Fallback: single screen
+            screens = QGuiApplication.screens()
+            if screens:
+                self.setGeometry(screens[0].geometry())
+            else:
+                self.setGeometry(0, 0, 1920, 1080)
 
         self.setWindowFlags(
             Qt.WindowType.FramelessWindowHint
@@ -136,9 +151,12 @@ class RegionSelector(QWidget):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
 
-        # Semi-transparent dark overlay
-        overlay_color = QColor(0, 0, 0, 100)
-        painter.fillRect(self.rect(), overlay_color)
+        # Draw frozen desktop screenshot as background so the user can
+        # see screen content even if a fullscreen app goes black.
+        if self._background and not self._background.isNull():
+            painter.drawPixmap(self.rect(), self._background)
+
+        overlay = QColor(0, 0, 0, 100)
 
         if self._start_pos and self._current_pos:
             sel_rect = QRect(
@@ -146,16 +164,15 @@ class RegionSelector(QWidget):
                 self.mapFromGlobal(self._current_pos),
             ).normalized()
 
-            # Clear the selected area
-            painter.setCompositionMode(
-                QPainter.CompositionMode.CompositionMode_Clear
-            )
-            painter.fillRect(sel_rect, Qt.GlobalColor.transparent)
+            # Dark overlay everywhere EXCEPT the selection rectangle.
+            # QPainterPath with OddEven fill: outer rect + inner rect
+            # → the intersection (selection) stays un-tinted.
+            path = QPainterPath()
+            path.addRect(QRectF(self.rect()))
+            path.addRect(QRectF(sel_rect))
+            painter.fillPath(path, overlay)
 
-            # Draw green border
-            painter.setCompositionMode(
-                QPainter.CompositionMode.CompositionMode_SourceOver
-            )
+            # Green border
             pen = QPen(QColor(0, 200, 0), 2)
             painter.setPen(pen)
             painter.drawRect(sel_rect)
@@ -174,6 +191,9 @@ class RegionSelector(QWidget):
             label = f"{pw} x {ph} px"
             painter.setPen(QColor(255, 255, 255))
             painter.drawText(sel_rect.left() + 4, sel_rect.top() - 6, label)
+        else:
+            # No selection yet — full dark overlay
+            painter.fillRect(self.rect(), overlay)
 
         painter.end()
 
@@ -207,9 +227,7 @@ class RegionSelector(QWidget):
 
             if width > 10 and height > 10:
                 # Find which screen the start point is on for diagnostics
-                from PyQt6.QtGui import QGuiApplication as _App
-                _screens = _App.screens()
-                for _s in _screens:
+                for _s in QGuiApplication.screens():
                     _g = _s.geometry()
                     if _g.contains(self._start_pos.x(), self._start_pos.y()):
                         print(
@@ -223,9 +241,9 @@ class RegionSelector(QWidget):
                     f"Physical ({x1},{y1}) {width}x{height}"
                 )
                 self.region_selected.emit(x1, y1, width, height)
-
-            self.close()
+            else:
+                self.cancelled.emit()
 
     def keyPressEvent(self, event) -> None:
         if event.key() == Qt.Key.Key_Escape:
-            self.close()
+            self.cancelled.emit()
