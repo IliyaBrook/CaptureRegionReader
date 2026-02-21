@@ -342,6 +342,7 @@ class TextDiffer:
         self._adaptive_timeout_ms: float = DEFAULT_GROWTH_TIMEOUT_MS
         self._last_update_time: float | None = None
         self._last_visible_text: str = ""
+        self._empty_frames: int = 0        # Consecutive empty OCR frames (debounce)
 
     def set_growing_subtitles(self, enabled: bool) -> None:
         """Switch between growing subtitles mode and normal mode."""
@@ -381,7 +382,7 @@ class TextDiffer:
         if (
             clean_old
             and clean_old in clean_new
-            and len(clean_new) > len(clean_old) + GROWTH_MIN_CHAR_DIFF
+            and len(clean_new) >= len(clean_old) + GROWTH_MIN_CHAR_DIFF
         ):
             return True
 
@@ -606,6 +607,7 @@ class TextDiffer:
         self._adaptive_timeout_ms = DEFAULT_GROWTH_TIMEOUT_MS
         self._last_update_time = None
         self._last_visible_text = ""
+        self._empty_frames = 0
 
     # ------------------------------------------------------------------
     # Growing subtitles mode
@@ -627,8 +629,16 @@ class TextDiffer:
         # --- No text on screen ---
         if not current_text:
             if self._buffer:
-                return self._flush_growing_buffer()
+                # Debounce: OCR can flicker (miss a frame). Require 2 empty
+                # frames in a row before flushing to avoid losing text.
+                self._empty_frames += 1
+                if self._empty_frames >= 2:
+                    self._empty_frames = 0
+                    return self._flush_growing_buffer()
+                return None
             return None
+
+        self._empty_frames = 0
 
         # --- First text (empty buffer, no last_visible) ---
         if not self._last_visible_text and not self._buffer:
@@ -649,28 +659,41 @@ class TextDiffer:
             return self._handle_replacement(current_text)
 
     def _classify_growing_change(self, new_text: str) -> str:
-        """Classify how on-screen text changed: same/grew/shifted/replaced."""
+        """Classify how on-screen text changed: same/grew/shifted/replaced.
+
+        IMPORTANT: Growth and shift detection run BEFORE similarity check.
+        Growing text has high similarity to its prefix (shared bigrams, words),
+        so checking similarity first would misclassify growth as "same" and
+        cause words to be silently dropped.
+        """
         old = self._last_visible_text
         norm_old = _normalize_for_compare(old)
         norm_new = _normalize_for_compare(new_text)
 
+        # Exact normalized match — definitely same
         if norm_old == norm_new:
             return "same"
 
-        if is_text_similar(old, new_text, self._threshold):
-            return "same"
-
-        # Situation A — growth: old content still present, new words appended
+        # Situation A — growth: old content still present, new words appended.
+        # Must be checked BEFORE similarity to avoid misclassifying growth
+        # as "same" (growing text shares most bigrams with its prefix).
         if self._is_growth(old, new_text):
             return "grew"
 
-        # Situation B — shift: tail of old visible as prefix of new
+        # Situation B — shift: tail of old visible as prefix of new.
+        # Also checked before similarity for the same reason.
+        # shift_start must be > 0: at least one word disappeared from the top.
+        # shift_start == 0 means all extracted words still match — not a shift.
         old_words = _extract_words(old)
         new_words = _extract_words(new_text)
         if old_words and new_words:
             shift_start = self._find_shift_overlap(old_words, new_words)
-            if shift_start is not None:
+            if shift_start is not None and shift_start > 0:
                 return "shifted"
+
+        # OCR jitter: text didn't grow or shift, but is very similar
+        if is_text_similar(old, new_text, self._threshold):
+            return "same"
 
         return "replaced"
 
@@ -707,9 +730,21 @@ class TextDiffer:
             avg = sum(self._growth_intervals) / len(self._growth_intervals)
             self._adaptive_timeout_ms = max(MIN_ADAPTIVE_TIMEOUT_MS, avg * TIMEOUT_MULTIPLIER)
 
-        new_words = new_text.split()
-        old_word_count = len(self._last_visible_text.split())
-        appended = new_words[old_word_count:]
+        # Extract new words using string-level comparison (robust to OCR jitter).
+        clean_old = _clean(self._last_visible_text)
+        clean_new = _clean(new_text)
+
+        appended: list[str] = []
+        if clean_old and clean_old in clean_new:
+            tail = clean_new[len(clean_old):].strip()
+            if tail:
+                appended = tail.split()
+        else:
+            # Fallback: word-count difference
+            new_words = new_text.split()
+            old_word_count = len(self._last_visible_text.split())
+            appended = new_words[old_word_count:]
+
         if appended:
             self._buffer.extend(appended)
 
@@ -787,13 +822,31 @@ class TextDiffer:
         return result
 
     def _start_new_growing_cycle(self, text: str) -> None:
-        """Initialize a new growing subtitles cycle."""
+        """Initialize a new growing subtitles cycle.
+
+        If the text overlaps with what was already spoken, advances
+        the cursor past the spoken prefix to avoid repetition.
+        """
         self._buffer = text.split()
         self._cursor = 0
         self._growth_intervals.clear()
         self._adaptive_timeout_ms = DEFAULT_GROWTH_TIMEOUT_MS
         self._last_update_time = time.monotonic()
         self._last_visible_text = text
+        self._empty_frames = 0
+
+        # Skip already-spoken prefix to avoid repetition.
+        if self._last_spoken:
+            clean_spoken = _clean(self._last_spoken)
+            clean_text = _clean(text)
+            if clean_spoken and clean_text:
+                if clean_text == clean_spoken:
+                    # Exact same text — everything already spoken
+                    self._cursor = len(self._buffer)
+                elif clean_text.startswith(clean_spoken):
+                    # New text contains spoken text as prefix — skip it
+                    spoken_word_count = len(self._last_spoken.split())
+                    self._cursor = min(spoken_word_count, len(self._buffer))
 
     def _flush_growing_buffer(self) -> str | None:
         """Speak all unspoken words from the buffer, then reset."""
@@ -804,6 +857,7 @@ class TextDiffer:
         self._adaptive_timeout_ms = DEFAULT_GROWTH_TIMEOUT_MS
         self._last_update_time = None
         self._last_visible_text = ""
+        self._empty_frames = 0
 
         if to_speak:
             result = " ".join(to_speak)

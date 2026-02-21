@@ -376,7 +376,12 @@ class MainWindow(QMainWindow):
         self._slider_interval.setValue(settings.ocr_interval_ms)
         self._slider_interval.valueChanged.connect(self._on_interval_changed)
         self._lbl_interval = QLabel(f"{settings.ocr_interval_ms} ms")
-        vbox.addLayout(_slider_row("OCR interval:", self._slider_interval, self._lbl_interval))
+        self._interval_row = _slider_row("OCR interval:", self._slider_interval, self._lbl_interval)
+        vbox.addLayout(self._interval_row)
+
+        # Apply initial growing-subtitles state to interval slider
+        if settings.growing_subtitles:
+            self._apply_growing_interval(True)
 
         parent.addWidget(group)
 
@@ -489,9 +494,27 @@ class MainWindow(QMainWindow):
         self.settings.tts_engine = engine
         self.tts_engine_changed.emit(engine)
 
+    _GROWING_OCR_INTERVAL_MS = 250  # Fast OCR when growing subtitles enabled
+
     def _on_growing_toggled(self, checked: bool) -> None:
         self.settings.growing_subtitles = checked
+        self._apply_growing_interval(checked)
         self.growing_subtitles_changed.emit(checked)
+
+    def _apply_growing_interval(self, growing: bool) -> None:
+        """Enable/disable OCR interval slider based on growing subtitles mode."""
+        if growing:
+            # Save user's manual interval, force a fast one
+            self._saved_interval_ms = self._slider_interval.value()
+            self._slider_interval.setValue(self._GROWING_OCR_INTERVAL_MS)
+            self._slider_interval.setEnabled(False)
+            self._lbl_interval.setText(f"{self._GROWING_OCR_INTERVAL_MS} ms (auto)")
+        else:
+            # Restore user's previous interval
+            saved = getattr(self, "_saved_interval_ms", self.settings.ocr_interval_ms)
+            self._slider_interval.setEnabled(True)
+            self._slider_interval.setValue(saved)
+            self._lbl_interval.setText(f"{saved} ms")
 
     def _on_rate_changed(self, value: int) -> None:
         self._lbl_rate.setText(f"{value} wpm")
