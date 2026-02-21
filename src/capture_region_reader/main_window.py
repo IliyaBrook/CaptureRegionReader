@@ -15,6 +15,7 @@ from PyQt6.QtWidgets import (
     QPushButton,
     QScrollArea,
     QSlider,
+    QSpinBox,
     QStatusBar,
     QTabWidget,
     QTextEdit,
@@ -346,7 +347,7 @@ class MainWindow(QMainWindow):
 
         growing_hint = QLabel(
             "Enable for subtitles that appear word-by-word (typing effect).\n"
-            "Automatically adapts to subtitle growth speed."
+            "Each line is read when it scrolls away or stops growing."
         )
         growing_hint.setStyleSheet("QLabel { color: #888; font-size: 11px; }")
         growing_hint.setWordWrap(True)

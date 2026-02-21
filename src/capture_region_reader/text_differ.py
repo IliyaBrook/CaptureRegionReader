@@ -33,11 +33,11 @@ GROWTH_WORD_OVERLAP_RATIO = 0.6
 # Minimum length difference to consider text as "grown" (not just OCR jitter).
 GROWTH_MIN_CHAR_DIFF = 2
 
-# Growing subtitles mode constants
-DEFAULT_GROWTH_TIMEOUT_MS = 2000   # Initial timeout before declaring growth done
-MIN_ADAPTIVE_TIMEOUT_MS = 500      # Floor for adaptive timeout (prevents near-zero)
-TIMEOUT_MULTIPLIER = 3             # adaptive_timeout = avg_interval * multiplier
-GROWTH_INTERVALS_MAXLEN = 5        # Sliding window size for interval averaging
+# Growing subtitles: if a line hasn't changed for this long, consider it complete
+GROWING_LINE_STABLE_MS = 2500
+
+# Growing subtitles: safety net — flush everything after this many ms of no changes
+GROWING_SAFETY_TIMEOUT_MS = 10000
 
 
 def _clean(text: str) -> str:
@@ -336,11 +336,11 @@ class TextDiffer:
 
         # --- Growing subtitles mode state ---
         self._growing_subtitles: bool = False
-        self._growth_intervals: deque[float] = deque(maxlen=GROWTH_INTERVALS_MAXLEN)
-        self._adaptive_timeout_ms: float = DEFAULT_GROWTH_TIMEOUT_MS
-        self._last_update_time: float | None = None
-        self._last_visible_text: str = ""
-        self._empty_frames: int = 0        # Consecutive empty OCR frames (debounce)
+        self._tracked_lines: list[str] = []
+        self._line_read: list[bool] = []
+        self._line_changed_at: list[float] = []
+        self._read_queue: deque[str] = deque()
+        self._empty_frames: int = 0
 
     def set_growing_subtitles(self, enabled: bool) -> None:
         """Switch between growing subtitles mode and normal mode."""
@@ -599,256 +599,206 @@ class TextDiffer:
         self._last_emit_time = 0.0
         self._clear_pending()
         # Growing mode state
-        self._growth_intervals.clear()
-        self._adaptive_timeout_ms = DEFAULT_GROWTH_TIMEOUT_MS
-        self._last_update_time = None
-        self._last_visible_text = ""
+        self._tracked_lines.clear()
+        self._line_read.clear()
+        self._line_changed_at.clear()
+        self._read_queue.clear()
         self._empty_frames = 0
 
     # ------------------------------------------------------------------
-    # Growing subtitles mode
+    # Growing subtitles mode — line-based "read on disappear" approach
     # ------------------------------------------------------------------
 
-    def _get_new_text_growing(self, current_text: str) -> str | None:
-        """Growing subtitles mode: track the latest visible text, speak on stabilisation.
+    def _lines_match(self, a: str, b: str) -> bool:
+        """Check if two OCR lines represent the same text (with jitter tolerance)."""
+        na = _normalize_for_compare(a)
+        nb = _normalize_for_compare(b)
+        if na == nb:
+            return True
+        return is_text_similar(a, b, 0.65)
 
-        Instead of accumulating words frame-by-frame (which amplifies OCR
-        errors), we keep the latest full text and extract only the new
-        portion when flushing by comparing against ``_last_spoken``.
+    def _line_grew(self, old_line: str, new_line: str) -> bool:
+        """Check if new_line is old_line with more content appended."""
+        return self._is_growth(old_line, new_line)
+
+    def _find_disappeared_count(self, tracked: list[str], current: list[str]) -> int:
+        """Find how many lines scrolled away from the top.
+
+        Matches current[0] against tracked lines to find the offset.
+        All tracked lines before the match index have disappeared.
+        """
+        if not current:
+            return len(tracked)
+
+        first = current[0]
+        for i, tl in enumerate(tracked):
+            if self._lines_match(tl, first):
+                return i
+            if self._line_grew(tl, first):
+                return i
+            # current[0] is a partial/degraded read of tracked[i]
+            if self._line_grew(first, tl):
+                return i
+
+        # No match — all tracked lines disappeared
+        return len(tracked)
+
+    def _enqueue_line(self, line: str) -> None:
+        """Add a line to the read queue (with dedup)."""
+        text = _clean(line)
+        if not text or len(text) < 3:
+            return
+        if self._is_in_history(line):
+            return
+        # Avoid queueing duplicates
+        norm = _normalize_for_compare(line)
+        for q in self._read_queue:
+            qn = _normalize_for_compare(q)
+            if qn == norm or is_text_similar(q, line, self._threshold):
+                return
+        self._read_queue.append(line)
+
+    def _dequeue_line(self) -> str | None:
+        """Return the next queued line for TTS, or None."""
+        while self._read_queue:
+            line = self._read_queue.popleft()
+            if self._is_in_history(line):
+                continue
+            self._record_spoken(line)
+            return line
+        return None
+
+    def _get_new_text_growing(self, current_text: str) -> str | None:
+        """Growing subtitles mode: line-based tracking.
+
+        Tracks individual lines and reads them when they:
+        1. Disappear from the top (scrolled away)
+        2. A new line appears below (previous lines are complete)
+        3. Stop changing for GROWING_LINE_STABLE_MS (stopped growing)
         """
         now = time.monotonic()
 
-        # --- Check timeout first ---
-        if self._last_update_time is not None and self._last_visible_text:
-            elapsed_ms = (now - self._last_update_time) * 1000
-            if elapsed_ms > self._adaptive_timeout_ms:
-                result = self._flush_growing()
-                if current_text:
-                    self._last_visible_text = current_text
-                    self._last_update_time = now
-                return result
+        # Parse current text into lines
+        current_lines: list[str] = []
+        if current_text:
+            current_lines = [
+                l.strip() for l in current_text.strip().splitlines() if l.strip()
+            ]
 
-        # --- No text on screen ---
-        if not current_text:
-            if self._last_visible_text:
-                # Debounce: OCR can flicker (miss a frame). Require 2 empty
-                # frames in a row before flushing to avoid losing text.
+        # --- Empty screen ---
+        if not current_lines:
+            if self._tracked_lines:
                 self._empty_frames += 1
                 if self._empty_frames >= 2:
+                    for i, line in enumerate(self._tracked_lines):
+                        if not self._line_read[i]:
+                            self._enqueue_line(line)
+                    self._tracked_lines.clear()
+                    self._line_read.clear()
+                    self._line_changed_at.clear()
                     self._empty_frames = 0
-                    return self._flush_growing()
-                return None
-            return None
+            return self._dequeue_line()
 
         self._empty_frames = 0
 
-        # --- First text (nothing tracked yet) ---
-        if not self._last_visible_text:
-            self._last_visible_text = current_text
-            self._last_update_time = now
-            return None
+        # --- First text ---
+        if not self._tracked_lines:
+            self._tracked_lines = current_lines[:]
+            self._line_read = [False] * len(current_lines)
+            self._line_changed_at = [now] * len(current_lines)
+            # If multiple lines from the start, all but last are complete
+            if len(current_lines) > 1:
+                for i in range(len(current_lines) - 1):
+                    self._enqueue_line(current_lines[i])
+                    self._line_read[i] = True
+            return self._dequeue_line()
 
-        # --- Classify change ---
-        old = self._last_visible_text
-        norm_old = _normalize_for_compare(old)
-        norm_new = _normalize_for_compare(current_text)
+        # --- Degraded frame detection ---
+        tracked_len = sum(len(_clean(l)) for l in self._tracked_lines)
+        current_len = sum(len(_clean(l)) for l in current_lines)
+        if tracked_len > 10 and current_len < tracked_len * 0.4:
+            return self._dequeue_line()  # skip this frame
 
-        # Exact normalized match — no change
-        if norm_old == norm_new:
-            return None
+        # --- Safety timeout: all text static for too long ---
+        if (
+            self._line_changed_at
+            and (now - max(self._line_changed_at)) * 1000
+            >= GROWING_SAFETY_TIMEOUT_MS
+        ):
+            for i, line in enumerate(self._tracked_lines):
+                if not self._line_read[i]:
+                    self._enqueue_line(line)
+            self._tracked_lines = current_lines[:]
+            self._line_read = [False] * len(current_lines)
+            self._line_changed_at = [now] * len(current_lines)
+            return self._dequeue_line()
 
-        # Growth: old content still present, new words appended
-        if self._is_growth(old, current_text):
-            self._track_growth_interval(now)
-            self._last_visible_text = current_text
-            self._last_update_time = now
-            return None
+        # --- Find how many lines disappeared from the top ---
+        disappeared = self._find_disappeared_count(
+            self._tracked_lines, current_lines,
+        )
 
-        # Relaxed growth: new text has more words and shares most with old.
-        # Handles OCR errors in existing words while new words are added
-        # (e.g. old = "исправления ошибок ...", new = "ицчравблслия ошуюок ... сил").
-        old_words = _extract_words(old)
-        new_words = _extract_words(current_text)
-        if len(new_words) > len(old_words) >= 2:
-            overlap = len(set(old_words) & set(new_words))
-            if overlap / len(old_words) >= GROWTH_WORD_OVERLAP_RATIO:
-                self._track_growth_interval(now)
-                self._last_visible_text = current_text
-                self._last_update_time = now
-                return None
+        # Enqueue disappeared unread lines
+        for i in range(disappeared):
+            if not self._line_read[i]:
+                self._enqueue_line(self._tracked_lines[i])
 
-        # Shift: tail of old visible as prefix of new
-        if old_words and new_words:
-            shift_start = self._find_shift_overlap(old_words, new_words)
-            if shift_start is not None and shift_start > 0:
-                result = self._flush_growing()
-                self._last_visible_text = current_text
-                self._last_update_time = now
-                return result
+        # Remaining tracked lines after removing disappeared
+        old_lines = self._tracked_lines[disappeared:]
+        old_read = self._line_read[disappeared:]
+        old_times = self._line_changed_at[disappeared:]
 
-        # OCR jitter: text is very similar but not growth/shift
-        if is_text_similar(old, current_text, self._threshold):
-            # Keep the LONGER version (more complete OCR)
-            if len(_clean(current_text)) >= len(_clean(old)):
-                self._last_visible_text = current_text
-            return None
+        # --- Rebuild tracked state from current lines ---
+        new_lines: list[str] = []
+        new_read: list[bool] = []
+        new_times: list[float] = []
 
-        # Degraded frame: new text is significantly shorter and not a shift.
-        # OCR temporarily failed on part of the text — ignore this frame
-        # rather than treating it as a replacement.
-        if len(_clean(current_text)) < len(_clean(old)) * 0.5:
-            return None
-
-        # Replacement: completely different text
-        result = self._flush_growing()
-        self._last_visible_text = current_text
-        self._last_update_time = now
-        return result
-
-    def _find_shift_overlap(
-        self, old_words: list[str], new_words: list[str]
-    ) -> int | None:
-        """Find where old text's suffix matches new text's prefix.
-
-        Returns the index in old_words where the overlap starts, or None.
-        E.g. old=["the","quick","brown","fox"], new=["brown","fox","jumps"]
-             returns 2 (old[2:] matches new[:2]).
-        """
-        for start in range(len(old_words)):
-            suffix = old_words[start:]
-            if len(suffix) > len(new_words):
-                continue
-            match = True
-            for i, old_w in enumerate(suffix):
-                if i >= len(new_words):
-                    match = False
-                    break
-                if old_w != new_words[i]:
-                    match = False
-                    break
-            if match and len(suffix) >= 1:
-                return start
-        return None
-
-    def _track_growth_interval(self, now: float) -> None:
-        """Update adaptive timeout based on growth interval."""
-        if self._last_update_time is not None:
-            interval_ms = (now - self._last_update_time) * 1000
-            self._growth_intervals.append(interval_ms)
-            avg = sum(self._growth_intervals) / len(self._growth_intervals)
-            self._adaptive_timeout_ms = max(
-                MIN_ADAPTIVE_TIMEOUT_MS, avg * TIMEOUT_MULTIPLIER
-            )
-
-    def _flush_growing(self) -> str | None:
-        """Flush the pending growing text.  Extract only the new portion.
-
-        Compares the accumulated visible text against what was already
-        spoken and returns only the genuinely new content.
-        """
-        pending = self._last_visible_text
-        self._last_visible_text = ""
-        self._growth_intervals.clear()
-        self._adaptive_timeout_ms = DEFAULT_GROWTH_TIMEOUT_MS
-        self._last_update_time = None
-        self._empty_frames = 0
-
-        if not pending:
-            return None
-
-        # Already spoken (exact or similar)
-        if self._is_in_history(pending):
-            return None
-
-        # No previous speech — speak everything
-        if not self._last_spoken:
-            self._record_spoken(pending)
-            return pending
-
-        result = self._extract_new_portion(pending)
-        if result:
-            # Record the FULL pending text as context for future comparisons.
-            # Even though TTS only speaks the new portion, the full text
-            # represents what was on screen and should be the baseline for
-            # detecting future growth.
-            self._record_spoken(pending)
-            return result
-        return None
-
-    def _extract_new_portion(self, pending: str) -> str | None:
-        """Extract the portion of *pending* not already covered by last spoken.
-
-        Strategies (in order):
-        1. Full similarity → nothing new
-        2. Spoken is prefix of pending → return tail
-        3. Spoken is contained in pending → return tail after spoken
-        4. Pending is subset of spoken → nothing new
-        5. New lines after overlap → return new lines
-        6. Word-level diff → return from first new word
-        7. Fallback → return full text
-        """
-        clean_spoken = _clean(self._last_spoken)
-        clean_pending = _clean(pending)
-
-        if not clean_pending:
-            return None
-
-        # 1. Full similarity check
-        if is_text_similar(clean_spoken, clean_pending, self._threshold):
-            return None
-
-        # 2. Spoken is prefix of pending → extract tail
-        if clean_spoken and clean_pending.startswith(clean_spoken):
-            tail = clean_pending[len(clean_spoken):].strip()
-            if tail and len(tail) > 2:
-                return tail
-
-        # 3. Spoken is contained in pending → extract tail after spoken
-        if clean_spoken and clean_spoken in clean_pending:
-            idx = clean_pending.index(clean_spoken)
-            tail = clean_pending[idx + len(clean_spoken):].strip()
-            if tail and len(tail) > 2:
-                return tail
-
-        # 4. Pending is subset of spoken → nothing new (already covered)
-        if clean_pending and clean_pending in clean_spoken:
-            return None
-
-        # 4b. Word-level subset: most pending words already spoken
-        words_spoken = set(_extract_words(self._last_spoken))
-        words_pending = _extract_words(pending)
-        if words_spoken and words_pending:
-            in_spoken = sum(1 for w in words_pending if w in words_spoken)
-            if in_spoken == len(words_pending):
-                # ALL meaningful words already spoken — nothing new
-                return None
-
-        # 5. New lines after overlap
-        spoken_lines = self._last_spoken.strip().splitlines()
-        pending_lines = pending.strip().splitlines()
-        if len(pending_lines) > len(spoken_lines):
-            overlap = 0
-            for i, sl in enumerate(spoken_lines):
-                if i < len(pending_lines):
-                    if is_text_similar(_clean(sl), _clean(pending_lines[i]), 0.7):
-                        overlap = i + 1
+        for ci, cur in enumerate(current_lines):
+            if ci < len(old_lines):
+                old = old_lines[ci]
+                if self._lines_match(old, cur) or self._line_grew(old, cur):
+                    clean_cur = _clean(cur)
+                    clean_old = _clean(old)
+                    if len(clean_cur) >= len(clean_old):
+                        new_lines.append(cur)
+                        new_times.append(
+                            now if clean_cur != clean_old else old_times[ci]
+                        )
                     else:
-                        break
-            if overlap > 0:
-                new_portion = "\n".join(pending_lines[overlap:])
-                if new_portion.strip():
-                    return new_portion.strip()
+                        new_lines.append(old)
+                        new_times.append(old_times[ci])
+                    new_read.append(old_read[ci])
+                else:
+                    # Different line at same position — old was replaced
+                    if not old_read[ci]:
+                        self._enqueue_line(old)
+                    new_lines.append(cur)
+                    new_read.append(False)
+                    new_times.append(now)
+            else:
+                # New line at the bottom
+                new_lines.append(cur)
+                new_read.append(False)
+                new_times.append(now)
 
-        # 6. Word-level diff
-        if words_spoken and words_pending:
-            new_words = [w for w in words_pending if w not in words_spoken]
-            if new_words:
-                first_new = new_words[0]
-                idx = clean_pending.lower().find(first_new)
-                if idx >= 0:
-                    tail = clean_pending[idx:].strip()
-                    if tail:
-                        return tail
+        # --- New lines appeared → finalize all lines above the last ---
+        if len(current_lines) > len(old_lines):
+            for i in range(len(new_lines) - 1):
+                if not new_read[i]:
+                    self._enqueue_line(new_lines[i])
+                    new_read[i] = True
 
-        # 7. Fallback: full pending text
-        return pending
+        # --- Per-line stable timeout: line stopped growing → read it ---
+        for i in range(len(new_lines)):
+            if (
+                not new_read[i]
+                and (now - new_times[i]) * 1000 >= GROWING_LINE_STABLE_MS
+            ):
+                self._enqueue_line(new_lines[i])
+                new_read[i] = True
+
+        self._tracked_lines = new_lines
+        self._line_read = new_read
+        self._line_changed_at = new_times
+
+        return self._dequeue_line()
