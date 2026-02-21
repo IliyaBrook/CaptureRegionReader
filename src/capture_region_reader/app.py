@@ -77,7 +77,7 @@ class App:
         w.select_region_hotkey_changed.connect(self._hotkey_manager.set_select_region_hotkey)
         w.interval_changed.connect(self._ocr_worker.set_interval)
         w.tts_engine_changed.connect(self._tts_worker.set_engine)
-        w.settle_time_changed.connect(self._text_differ.set_settle_time)
+        w.growing_subtitles_changed.connect(self._text_differ.set_growing_subtitles)
 
         # Engine unavailable errors — show dialog and revert combo box
         self._tts_worker.engine_unavailable.connect(w.revert_tts_engine)
@@ -90,7 +90,7 @@ class App:
         self._tts_worker.set_language(s.language)
         self._ocr_worker.set_language(s.language)
         self._ocr_worker.set_interval(s.ocr_interval_ms)
-        self._text_differ.set_settle_time(s.settle_time_ms)
+        self._text_differ.set_growing_subtitles(s.growing_subtitles)
         self._hotkey_manager.set_hotkey(s.hotkey)
         self._hotkey_manager.set_select_region_hotkey(s.select_region_hotkey)
 

@@ -3,6 +3,7 @@ from __future__ import annotations
 from PyQt6.QtCore import Qt, pyqtSignal
 from PyQt6.QtGui import QIcon, QImage, QKeySequence, QPixmap
 from PyQt6.QtWidgets import (
+    QCheckBox,
     QComboBox,
     QFormLayout,
     QGroupBox,
@@ -109,7 +110,7 @@ class MainWindow(QMainWindow):
     select_region_hotkey_changed = pyqtSignal(str)
     interval_changed = pyqtSignal(int)
     tts_engine_changed = pyqtSignal(str)
-    settle_time_changed = pyqtSignal(int)
+    growing_subtitles_changed = pyqtSignal(bool)
 
     def __init__(self, settings: AppSettings) -> None:
         super().__init__()
@@ -337,24 +338,20 @@ class MainWindow(QMainWindow):
             row.addWidget(value_label)
             return row
 
-        # Settle time hint
-        settle_hint = QLabel(
-            "Wait for subtitles that appear gradually (typing effect).\n"
-            "Set to 0 if subtitles appear all at once."
-        )
-        settle_hint.setStyleSheet("QLabel { color: #888; font-size: 11px; }")
-        settle_hint.setWordWrap(True)
-        settle_hint.setContentsMargins(0, 2, 0, 2)
-        vbox.addWidget(settle_hint)
+        # Growing subtitles checkbox
+        self._chk_growing = QCheckBox("Growing Subtitles")
+        self._chk_growing.setChecked(settings.growing_subtitles)
+        self._chk_growing.toggled.connect(self._on_growing_toggled)
+        vbox.addWidget(self._chk_growing)
 
-        # Settle time
-        self._slider_settle = QSlider(Qt.Orientation.Horizontal)
-        self._slider_settle.setRange(0, 2000)
-        self._slider_settle.setSingleStep(50)
-        self._slider_settle.setValue(settings.settle_time_ms)
-        self._slider_settle.valueChanged.connect(self._on_settle_changed)
-        self._lbl_settle = QLabel(f"{settings.settle_time_ms} ms")
-        vbox.addLayout(_slider_row("Settle time:", self._slider_settle, self._lbl_settle))
+        growing_hint = QLabel(
+            "Enable for subtitles that appear word-by-word (typing effect).\n"
+            "Automatically adapts to subtitle growth speed."
+        )
+        growing_hint.setStyleSheet("QLabel { color: #888; font-size: 11px; }")
+        growing_hint.setWordWrap(True)
+        growing_hint.setContentsMargins(20, 0, 0, 4)
+        vbox.addWidget(growing_hint)
 
         # Speech speed
         self._slider_rate = QSlider(Qt.Orientation.Horizontal)
@@ -492,10 +489,9 @@ class MainWindow(QMainWindow):
         self.settings.tts_engine = engine
         self.tts_engine_changed.emit(engine)
 
-    def _on_settle_changed(self, value: int) -> None:
-        self._lbl_settle.setText(f"{value} ms")
-        self.settings.settle_time_ms = value
-        self.settle_time_changed.emit(value)
+    def _on_growing_toggled(self, checked: bool) -> None:
+        self.settings.growing_subtitles = checked
+        self.growing_subtitles_changed.emit(checked)
 
     def _on_rate_changed(self, value: int) -> None:
         self._lbl_rate.setText(f"{value} wpm")

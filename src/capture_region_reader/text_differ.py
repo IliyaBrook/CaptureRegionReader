@@ -33,6 +33,12 @@ GROWTH_WORD_OVERLAP_RATIO = 0.6
 # Minimum length difference to consider text as "grown" (not just OCR jitter).
 GROWTH_MIN_CHAR_DIFF = 2
 
+# Growing subtitles mode constants
+DEFAULT_GROWTH_TIMEOUT_MS = 2000   # Initial timeout before declaring growth done
+MIN_ADAPTIVE_TIMEOUT_MS = 500      # Floor for adaptive timeout (prevents near-zero)
+TIMEOUT_MULTIPLIER = 3             # adaptive_timeout = avg_interval * multiplier
+GROWTH_INTERVALS_MAXLEN = 5        # Sliding window size for interval averaging
+
 
 def _clean(text: str) -> str:
     """Normalize text for comparison: collapse whitespace, strip OCR artifacts."""
@@ -313,24 +319,34 @@ class TextDiffer:
     def __init__(
         self,
         similarity_threshold: float = DEFAULT_SIMILARITY_THRESHOLD,
-        settle_time_ms: int = 300,
     ):
+        # --- Shared state (both modes) ---
         self._last_spoken: str = ""
         self._spoken_history: deque[str] = deque(maxlen=5)
         self._threshold = similarity_threshold
-
-        # Stabilization state for growing text (time-based)
-        self._settle_time_ms = settle_time_ms
-        self._pending_text: str | None = None
-        self._last_change_time: float | None = None
 
         # Post-speech cooldown: suppress similar texts shortly after emission
         self._last_emit_time: float = 0.0
         self._cooldown_ms: int = 2000
 
-    def set_settle_time(self, ms: int) -> None:
-        """Update settle time (called when user changes the setting)."""
-        self._settle_time_ms = ms
+        # --- Normal mode state (growing_subtitles=False) ---
+        self._settle_time_ms: int = 0  # 0 = immediate flush
+        self._pending_text: str | None = None
+        self._last_change_time: float | None = None
+
+        # --- Growing subtitles mode state ---
+        self._growing_subtitles: bool = False
+        self._buffer: list[str] = []       # Accumulated words
+        self._cursor: int = 0              # How far we've spoken into _buffer
+        self._growth_intervals: deque[float] = deque(maxlen=GROWTH_INTERVALS_MAXLEN)
+        self._adaptive_timeout_ms: float = DEFAULT_GROWTH_TIMEOUT_MS
+        self._last_update_time: float | None = None
+        self._last_visible_text: str = ""
+
+    def set_growing_subtitles(self, enabled: bool) -> None:
+        """Switch between growing subtitles mode and normal mode."""
+        self._growing_subtitles = enabled
+        self.reset()
 
     def _is_in_history(self, text: str) -> bool:
         """Check if normalized text matches any recently spoken text."""
@@ -395,6 +411,12 @@ class TextDiffer:
 
     def get_new_text(self, current_text: str) -> str | None:
         """Return text to speak, or None if no meaningful change detected."""
+        if self._growing_subtitles:
+            return self._get_new_text_growing(current_text)
+        return self._get_new_text_normal(current_text)
+
+    def _get_new_text_normal(self, current_text: str) -> str | None:
+        """Normal mode: immediate emit, no buffering for growing text."""
         if not current_text:
             # No text on screen -- if we had pending text, emit it now
             # (subtitle disappeared, so whatever we had is final)
@@ -577,3 +599,214 @@ class TextDiffer:
         self._spoken_history.clear()
         self._last_emit_time = 0.0
         self._clear_pending()
+        # Growing mode state
+        self._buffer = []
+        self._cursor = 0
+        self._growth_intervals.clear()
+        self._adaptive_timeout_ms = DEFAULT_GROWTH_TIMEOUT_MS
+        self._last_update_time = None
+        self._last_visible_text = ""
+
+    # ------------------------------------------------------------------
+    # Growing subtitles mode
+    # ------------------------------------------------------------------
+
+    def _get_new_text_growing(self, current_text: str) -> str | None:
+        """Growing subtitles mode: track growth and speak incrementally."""
+        now = time.monotonic()
+
+        # --- Check timeout first ---
+        if self._last_update_time is not None and self._buffer:
+            elapsed_ms = (now - self._last_update_time) * 1000
+            if elapsed_ms > self._adaptive_timeout_ms:
+                result = self._flush_growing_buffer()
+                if current_text:
+                    self._start_new_growing_cycle(current_text)
+                return result
+
+        # --- No text on screen ---
+        if not current_text:
+            if self._buffer:
+                return self._flush_growing_buffer()
+            return None
+
+        # --- First text (empty buffer, no last_visible) ---
+        if not self._last_visible_text and not self._buffer:
+            self._start_new_growing_cycle(current_text)
+            return None
+
+        # --- Classify change ---
+        situation = self._classify_growing_change(current_text)
+
+        if situation == "same":
+            return None
+        elif situation == "grew":
+            self._handle_growth(current_text, now)
+            return None
+        elif situation == "shifted":
+            return self._handle_shift(current_text, now)
+        else:  # "replaced"
+            return self._handle_replacement(current_text)
+
+    def _classify_growing_change(self, new_text: str) -> str:
+        """Classify how on-screen text changed: same/grew/shifted/replaced."""
+        old = self._last_visible_text
+        norm_old = _normalize_for_compare(old)
+        norm_new = _normalize_for_compare(new_text)
+
+        if norm_old == norm_new:
+            return "same"
+
+        if is_text_similar(old, new_text, self._threshold):
+            return "same"
+
+        # Situation A — growth: old content still present, new words appended
+        if self._is_growth(old, new_text):
+            return "grew"
+
+        # Situation B — shift: tail of old visible as prefix of new
+        old_words = _extract_words(old)
+        new_words = _extract_words(new_text)
+        if old_words and new_words:
+            shift_start = self._find_shift_overlap(old_words, new_words)
+            if shift_start is not None:
+                return "shifted"
+
+        return "replaced"
+
+    def _find_shift_overlap(
+        self, old_words: list[str], new_words: list[str]
+    ) -> int | None:
+        """Find where old text's suffix matches new text's prefix.
+
+        Returns the index in old_words where the overlap starts, or None.
+        E.g. old=["the","quick","brown","fox"], new=["brown","fox","jumps"]
+             returns 2 (old[2:] matches new[:2]).
+        """
+        for start in range(len(old_words)):
+            suffix = old_words[start:]
+            if len(suffix) > len(new_words):
+                continue
+            match = True
+            for i, old_w in enumerate(suffix):
+                if i >= len(new_words):
+                    match = False
+                    break
+                if old_w != new_words[i]:
+                    match = False
+                    break
+            if match and len(suffix) >= 1:
+                return start
+        return None
+
+    def _handle_growth(self, new_text: str, now: float) -> None:
+        """Situation A: text grew (words appended)."""
+        if self._last_update_time is not None:
+            interval_ms = (now - self._last_update_time) * 1000
+            self._growth_intervals.append(interval_ms)
+            avg = sum(self._growth_intervals) / len(self._growth_intervals)
+            self._adaptive_timeout_ms = max(MIN_ADAPTIVE_TIMEOUT_MS, avg * TIMEOUT_MULTIPLIER)
+
+        new_words = new_text.split()
+        old_word_count = len(self._last_visible_text.split())
+        appended = new_words[old_word_count:]
+        if appended:
+            self._buffer.extend(appended)
+
+        self._last_update_time = now
+        self._last_visible_text = new_text
+
+    def _handle_shift(self, new_text: str, now: float) -> str | None:
+        """Situation B: text shifted (beginning disappeared, tail still visible)."""
+        old_words_raw = self._last_visible_text.split()
+        new_words_raw = new_text.split()
+
+        old_extracted = _extract_words(self._last_visible_text)
+        new_extracted = _extract_words(new_text)
+        shift_start = self._find_shift_overlap(old_extracted, new_extracted)
+
+        if shift_start is None:
+            return self._handle_replacement(new_text)
+
+        # Find how many raw words disappeared from the top.
+        # Map old_extracted[shift_start] back to raw word index.
+        overlap_word = old_extracted[shift_start]
+        raw_shift_idx = None
+        for i, w in enumerate(old_words_raw):
+            cleaned = re.sub(r"^[^\w]+|[^\w]+$", "", w).lower()
+            if cleaned == overlap_word:
+                raw_shift_idx = i
+                break
+
+        if raw_shift_idx is None:
+            return self._handle_replacement(new_text)
+
+        # Words that disappeared from old visible text
+        disappeared_count = raw_shift_idx
+
+        # Speak from cursor to cursor + disappeared_count
+        speak_end = min(self._cursor + disappeared_count, len(self._buffer))
+        to_speak = self._buffer[self._cursor:speak_end]
+        self._cursor = speak_end
+
+        # Append new words that appeared after the overlap region
+        overlap_length = len(old_extracted) - shift_start
+        if len(new_extracted) > overlap_length:
+            # Find raw index of last overlap word in new_words
+            last_overlap_word = old_extracted[-1] if old_extracted else None
+            raw_overlap_end = None
+            if last_overlap_word:
+                for i in range(len(new_words_raw) - 1, -1, -1):
+                    cleaned = re.sub(r"^[^\w]+|[^\w]+$", "", new_words_raw[i]).lower()
+                    if cleaned == last_overlap_word:
+                        raw_overlap_end = i + 1
+                        break
+            if raw_overlap_end is not None and raw_overlap_end < len(new_words_raw):
+                self._buffer.extend(new_words_raw[raw_overlap_end:])
+
+        # Update interval tracking
+        if self._last_update_time is not None:
+            interval_ms = (now - self._last_update_time) * 1000
+            self._growth_intervals.append(interval_ms)
+            avg = sum(self._growth_intervals) / len(self._growth_intervals)
+            self._adaptive_timeout_ms = max(MIN_ADAPTIVE_TIMEOUT_MS, avg * TIMEOUT_MULTIPLIER)
+
+        self._last_update_time = now
+        self._last_visible_text = new_text
+
+        if to_speak:
+            result = " ".join(to_speak)
+            self._record_spoken(result)
+            return result
+        return None
+
+    def _handle_replacement(self, new_text: str) -> str | None:
+        """Situation C: text completely different (old subtitle ended)."""
+        result = self._flush_growing_buffer()
+        self._start_new_growing_cycle(new_text)
+        return result
+
+    def _start_new_growing_cycle(self, text: str) -> None:
+        """Initialize a new growing subtitles cycle."""
+        self._buffer = text.split()
+        self._cursor = 0
+        self._growth_intervals.clear()
+        self._adaptive_timeout_ms = DEFAULT_GROWTH_TIMEOUT_MS
+        self._last_update_time = time.monotonic()
+        self._last_visible_text = text
+
+    def _flush_growing_buffer(self) -> str | None:
+        """Speak all unspoken words from the buffer, then reset."""
+        to_speak = self._buffer[self._cursor:]
+        self._buffer = []
+        self._cursor = 0
+        self._growth_intervals.clear()
+        self._adaptive_timeout_ms = DEFAULT_GROWTH_TIMEOUT_MS
+        self._last_update_time = None
+        self._last_visible_text = ""
+
+        if to_speak:
+            result = " ".join(to_speak)
+            self._record_spoken(result)
+            return result
+        return None

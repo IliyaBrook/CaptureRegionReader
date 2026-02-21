@@ -14,7 +14,7 @@ class AppSettings:
     volume: float = 1.0
     ocr_interval_ms: int = 500
     tts_engine: str = "edge-tts"   # "silero" (local, RU) | "edge-tts" (cloud)
-    settle_time_ms: int = 300      # 0-2000ms, text stabilization delay
+    growing_subtitles: bool = False  # Adaptive mode for word-by-word subtitles
 
     def save(self) -> None:
         s = QSettings("CaptureRegionReader", "CaptureRegionReader")
@@ -32,7 +32,7 @@ class AppSettings:
         s.setValue("volume", self.volume)
         s.setValue("ocr_interval_ms", self.ocr_interval_ms)
         s.setValue("tts_engine", self.tts_engine)
-        s.setValue("settle_time_ms", self.settle_time_ms)
+        s.setValue("growing_subtitles", self.growing_subtitles)
 
     @classmethod
     def load(cls) -> AppSettings:
@@ -54,5 +54,5 @@ class AppSettings:
             volume=float(s.value("volume", 1.0)),
             ocr_interval_ms=int(s.value("ocr_interval_ms", 500)),
             tts_engine=str(s.value("tts_engine", "edge-tts")),
-            settle_time_ms=int(s.value("settle_time_ms", 300)),
+            growing_subtitles=str(s.value("growing_subtitles", "false")).lower() in ("true", "1", "yes"),
         )
