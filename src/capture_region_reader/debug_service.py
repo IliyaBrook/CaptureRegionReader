@@ -1,11 +1,11 @@
 """Debug service: per-subtitle artifact saving and pipeline logging.
 
 When ``CRR_DEBUG=1`` is set, DebugService creates a session directory under
-``.tests/debug/`` and records every stage of the OCR → TTS pipeline.
+``debug_logs/`` and records every stage of the OCR → TTS pipeline.
 
 Each spoken subtitle gets its own numbered folder::
 
-    .tests/debug/session_YYYYMMDD_HHMMSS/
+    debug_logs/session_YYYYMMDD_HHMMSS/
         pipeline.log
         001/
             text.txt          # text sent to TTS
@@ -22,7 +22,7 @@ from datetime import datetime
 import numpy as np
 from PIL import Image
 
-_DEBUG_ROOT = os.path.join(os.path.dirname(__file__), "..", "..", ".tests", "debug")
+_DEBUG_ROOT = os.path.join(os.path.dirname(__file__), "..", "..", "debug_logs")
 
 
 def is_debug_enabled() -> bool:

@@ -1,6 +1,6 @@
 ---
 name: test-ocr-pipeline
-description: "Test the OCR pipeline (text isolation, OCR engines, text cleaning) using test assets from .tests/. Use when debugging OCR accuracy, text isolation, or text cleaning issues."
+description: "Test the OCR pipeline (text isolation, OCR engines, text cleaning) using test assets from tests/. Use when debugging OCR accuracy, text isolation, or text cleaning issues."
 disable-model-invocation: true
 ---
 
@@ -8,27 +8,27 @@ disable-model-invocation: true
 
 ## Test Assets
 
-Located in `.tests/`:
+Located in `tests/`:
 
 | Asset | Purpose |
 |-------|---------|
-| `.tests/test-box-search/1.png`, `2.png` | Box search mode testing (subtitle bars) |
-| `.tests/test-box-search/3.png`, `pay.png` | Small region box search |
-| `.tests/test_bilingual.py` | Bilingual OCR merging test |
-| `.tests/test_dualpass_rus.py` | Dual-pass Russian OCR test |
-| `.tests/test_isolator_vs_raw.py` | Compare isolated vs raw OCR |
-| `.tests/test_tesseract_bilingual.py` | Tesseract bilingual config test |
-| `.tests/debug_merge.py` | Debug text merging logic |
+| `tests/test-box-search/1.png`, `2.png` | Box search mode testing (subtitle bars) |
+| `tests/test-box-search/3.png`, `pay.png` | Small region box search |
+| `tests/test_bilingual.py` | Bilingual OCR merging test |
+| `tests/test_dualpass_rus.py` | Dual-pass Russian OCR test |
+| `tests/test_isolator_vs_raw.py` | Compare isolated vs raw OCR |
+| `tests/test_tesseract_bilingual.py` | Tesseract bilingual config test |
+| `tests/debug_merge.py` | Debug text merging logic |
 
 ## Running Test Scripts
 
 ```bash
 # Run individual test scripts
-uv run python .tests/test_bilingual.py
-uv run python .tests/test_dualpass_rus.py
-uv run python .tests/test_isolator_vs_raw.py
-uv run python .tests/test_tesseract_bilingual.py
-uv run python .tests/debug_merge.py
+uv run python tests/test_bilingual.py
+uv run python tests/test_dualpass_rus.py
+uv run python tests/test_isolator_vs_raw.py
+uv run python tests/test_tesseract_bilingual.py
+uv run python tests/debug_merge.py
 ```
 
 ## Quick OCR Test (inline)
@@ -41,7 +41,7 @@ from capture_region_reader.text_isolator import TextIsolator, IsolatorConfig
 from capture_region_reader.ocr_worker import TesseractEngine
 
 # Load test image
-img = cv2.imread(".tests/test-box-search/1.png")
+img = cv2.imread("tests/test-box-search/1.png")
 
 # Test with text isolation
 isolator = TextIsolator(IsolatorConfig())

@@ -57,6 +57,6 @@ False negatives (keeping a garbled word) are preferable to false positives
   splitting can cause misalignment.
 
 ## Test Coverage
-- `.tests/test_dualpass_rus.py`: 87 unit tests covering all helpers and integration
-- `.tests/test_bilingual.py`: existing tests still pass (backward compatible)
-- `.tests/debug_merge.py`: imports old function names, needs updating
+- `tests/test_dualpass_rus.py`: 87 unit tests covering all helpers and integration
+- `tests/test_bilingual.py`: existing tests still pass (backward compatible)
+- `tests/debug_merge.py`: imports old function names, needs updating

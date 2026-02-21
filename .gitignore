@@ -5,5 +5,5 @@ dist/
 build/
 *.egg-info/
 .idea/
-.tests
+debug_logs/
 cheatsheets

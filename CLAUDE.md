@@ -20,7 +20,7 @@ make clean           # Remove __pycache__, .egg-info, build artifacts
 sudo apt install tesseract-ocr tesseract-ocr-eng tesseract-ocr-rus ffmpeg libxcb-xinerama0 libxcb-cursor0
 ```
 
-There is no automated test suite. The `.tests/` directory contains manual test assets only.
+There is no automated test suite. The `tests/` directory contains manual test assets only.
 
 ## Architecture
 

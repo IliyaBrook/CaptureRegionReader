@@ -49,8 +49,8 @@
   `_phonetic_transliterate()`, `_unique_russian_ratio()`, `_find_positional_replacement()`,
   `_strip_word_punctuation()`, `_RUS_TO_PHONETIC`, `_COMMON_RUS_SHORT`
 - `_is_garbled_word()` now treats digits+Cyrillic(>=2 chars) as garbled
-- NOTE: `.tests/debug_merge.py` imports old function names -- needs updating if used
-- Test file: `.tests/test_dualpass_rus.py` (87 tests, 0 failures)
+- NOTE: `tests/debug_merge.py` imports old function names -- needs updating if used
+- Test file: `tests/test_dualpass_rus.py` (87 tests, 0 failures)
 
 ## Reference: Translumo Patterns
 - See `/mnt/DiskE_Crucial/codding/Translumo/` for C# reference project
