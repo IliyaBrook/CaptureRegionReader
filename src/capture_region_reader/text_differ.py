@@ -847,6 +847,16 @@ class TextDiffer:
                     # New text contains spoken text as prefix — skip it
                     spoken_word_count = len(self._last_spoken.split())
                     self._cursor = min(spoken_word_count, len(self._buffer))
+                elif clean_spoken in clean_text:
+                    # Spoken text is a substring (OCR jitter shifted the match)
+                    spoken_word_count = len(self._last_spoken.split())
+                    self._cursor = min(spoken_word_count, len(self._buffer))
+                elif is_text_similar(clean_spoken, clean_text, self._threshold):
+                    # OCR jitter: essentially the same as what was spoken
+                    self._cursor = len(self._buffer)
+                elif self._is_in_history(text):
+                    # Text matches something in spoken history
+                    self._cursor = len(self._buffer)
 
     def _flush_growing_buffer(self) -> str | None:
         """Speak all unspoken words from the buffer, then reset."""
@@ -861,6 +871,10 @@ class TextDiffer:
 
         if to_speak:
             result = " ".join(to_speak)
+            # Avoid re-speaking text that's already in history
+            # (can happen after timeout flush when same text restarts a cycle)
+            if self._is_in_history(result):
+                return None
             self._record_spoken(result)
             return result
         return None

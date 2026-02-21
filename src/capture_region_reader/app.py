@@ -262,7 +262,7 @@ class App:
     def _on_text_recognized(self, text: str) -> None:
         d = self._debug
 
-        # Apply language filter first (removes lines with wrong language)
+        # Apply language filter (removes lines with wrong language)
         filtered = filter_by_language(text, self._settings.language)
 
         if d and text:
@@ -274,10 +274,23 @@ class App:
         if filtered:
             self._window.update_text_display(filtered)
 
-        new_text = self._text_differ.get_new_text(filtered)
+        # In growing subtitles mode, feed raw text (after OCR garbage filter
+        # but before lang filter) to the differ.  The lang filter can strip
+        # partially-visible text to empty, which confuses the growing-mode
+        # buffer by making it think the subtitle disappeared.
+        # Lang filter is applied to the differ's output before TTS instead.
+        growing = self._settings.growing_subtitles
+        differ_input = text if growing else filtered
+
+        new_text = self._text_differ.get_new_text(differ_input)
         if new_text:
             if d:
                 d.log("DIFFER NEW", repr(new_text))
+
+            # In growing mode, apply lang filter to the output
+            if growing:
+                new_text = filter_by_language(new_text, self._settings.language)
+
             # Clean text for natural TTS reading (remove symbols, OCR artifacts)
             cleaned = clean_for_tts(new_text)
             if cleaned:
@@ -287,7 +300,7 @@ class App:
                 self._tts_worker.speak(cleaned)
             elif d:
                 d.log("TTS SKIP", "clean_for_tts returned empty")
-        elif d and filtered:
+        elif d and (filtered if not growing else text):
             d.log("DIFFER SKIP", "duplicate/similar, not speaking")
 
     def _on_language_changed(self, lang: str) -> None:

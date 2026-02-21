@@ -349,7 +349,12 @@ def filter_by_language(text: str, language: str) -> str:
                         real_words += 1
 
             total_checked = real_words + fake_words
-            if total_checked > 0 and fake_words / total_checked >= 0.5:
+            # Only reject if ALL checked words are fake (no real Cyrillic
+            # words at all).  Common words like "нас", "вас", "масса",
+            # "всем" consist entirely of ambiguous Cyrillic letters and
+            # were being false-positived.  If even ONE word has genuine
+            # non-ambiguous Cyrillic, the line is real Russian.
+            if total_checked > 0 and real_words == 0:
                 continue
 
             filtered.append(line)
