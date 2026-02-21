@@ -15,12 +15,8 @@ from __future__ import annotations
 import re
 import unicodedata
 
-# ---------------------------------------------------------------------------
-# Character replacement maps (organized by category)
-# ---------------------------------------------------------------------------
 
-# Fullwidth forms -> ASCII equivalents (from Translumo _replacers).
-# These appear in CJK contexts or when OCR misreads standard characters.
+
 _FULLWIDTH_REPLACEMENTS: dict[str, str] = {
     "\uff10": "0", "\uff11": "1", "\uff12": "2", "\uff13": "3", "\uff14": "4",
     "\uff15": "5", "\uff16": "6", "\uff17": "7", "\uff18": "8", "\uff19": "9",
@@ -29,49 +25,49 @@ _FULLWIDTH_REPLACEMENTS: dict[str, str] = {
     "\uff0e": ". ",
 }
 
-# CJK-specific punctuation -> ASCII equivalents.
+
 _CJK_PUNCTUATION: dict[str, str] = {
-    "\u3001": ",",    # ideographic comma
-    "\u3010": "[",    # left tortoise shell bracket
-    "\u3011": "]",    # right tortoise shell bracket
-    "\u2026": "...",  # horizontal ellipsis
-    "\u2e3a": "-",    # two-em dash
-    "\u266a": "",     # eighth note (music symbol)
-    "\u301f": '"',    # low double prime quotation mark
-    "\u301d": '"',    # reversed double prime quotation mark
+    "\u3001": ",",
+    "\u3010": "[",
+    "\u3011": "]",
+    "\u2026": "...",
+    "\u2e3a": "-",
+    "\u266a": "",  # eighth note (music symbol)
+    "\u301f": '"',  # low double prime quotation mark
+    "\u301d": '"',  # reversed double prime quotation mark
     "\u30fb\u30fb\u30fb": "...",  # katakana middle dot x3
-    "\u2025": "..",   # two dot leader
+    "\u2025": "..",  # two dot leader
 }
 
 # Typographic punctuation -> simple ASCII for TTS.
 # TTS engines read many of these literally (e.g. "em dash" in Russian).
 _TYPOGRAPHIC_REPLACEMENTS: dict[str, str] = {
-    "\u2014": ",",    # em dash -> pause
-    "\u2013": ",",    # en dash -> pause
-    "\u2015": ",",    # horizontal bar -> pause
-    "\u00ab": "",     # left guillemet
-    "\u00bb": "",     # right guillemet
-    "\u201e": "",     # double low quotation
-    "\u201c": "",     # left double quotation
-    "\u201d": "",     # right double quotation
-    "\u2018": "",     # left single quotation
-    "\u2019": "'",    # right single quotation -> apostrophe
-    "\u2026": ".",    # ellipsis -> period
-    "\u2032": "'",    # prime -> apostrophe
-    "`": "'",         # backtick -> apostrophe
+    "\u2014": ",",  # em dash -> pause
+    "\u2013": ",",  # en dash -> pause
+    "\u2015": ",",  # horizontal bar -> pause
+    "\u00ab": "",  # left guillemet
+    "\u00bb": "",  # right guillemet
+    "\u201e": "",  # double low quotation
+    "\u201c": "",  # left double quotation
+    "\u201d": "",  # right double quotation
+    "\u2018": "",  # left single quotation
+    "\u2019": "'",  # right single quotation -> apostrophe
+    "\u2026": ".",  # ellipsis -> period
+    "\u2032": "'",  # prime -> apostrophe
+    "`": "'",  # backtick -> apostrophe
 }
 
 # Symbols that TTS would read literally (e.g. "backslash", "dollar sign").
 _SYMBOL_REPLACEMENTS: dict[str, str] = {
-    "\\": " ",   "/": " ",   "|": " ",   "~": " ",   "_": " ",
-    "$": "",     "#": "",    "@": "",    "^": "",    "*": "",
-    "+": "",     "=": "",    "<": "",    ">": "",
-    "{": "",     "}": "",    "[": "",    "]": "",
+    "\\": " ", "/": " ", "|": " ", "~": " ", "_": " ",
+    "$": "", "#": "", "@": "", "^": "", "*": "",
+    "+": "", "=": "", "<": "", ">": "",
+    "{": "", "}": "", "[": "", "]": "",
     "\u00a9": "",  # copyright
     "\u00ae": "",  # registered
     "\u2122": "",  # trademark
     "\u00b0": " gradusov ",  # degree sign (Russian TTS context)
-    "\u2116": "nomer ",      # numero sign
+    "\u2116": "nomer ",  # numero sign
     "\u00a7": "",  # section sign
     "\u00b6": "",  # pilcrow
     "\u2020": "",  # dagger

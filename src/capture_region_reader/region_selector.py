@@ -41,6 +41,66 @@ def qt_point_to_physical(qt_x: int, qt_y: int) -> tuple[int, int]:
     return qt_x, qt_y
 
 
+def physical_to_qt_rect(
+    phys_left: int, phys_top: int, phys_w: int, phys_h: int,
+) -> tuple[int, int, int, int]:
+    """Convert physical X11/mss coordinates back to Qt logical coordinates."""
+    screens = QGuiApplication.screens()
+    for screen in screens:
+        geo = screen.geometry()
+        dpr = screen.devicePixelRatio()
+        # Screen physical extent (origin is already physical on X11)
+        phys_right = geo.x() + geo.width() * dpr
+        phys_bottom = geo.y() + geo.height() * dpr
+        if geo.x() <= phys_left < phys_right and geo.y() <= phys_top < phys_bottom:
+            qt_x = geo.x() + (phys_left - geo.x()) / dpr
+            qt_y = geo.y() + (phys_top - geo.y()) / dpr
+            qt_w = phys_w / dpr
+            qt_h = phys_h / dpr
+            return int(qt_x), int(qt_y), int(qt_w), int(qt_h)
+    # Fallback: use first screen DPR
+    if screens:
+        dpr = screens[0].devicePixelRatio()
+        return (
+            int(phys_left / dpr), int(phys_top / dpr),
+            int(phys_w / dpr), int(phys_h / dpr),
+        )
+    return phys_left, phys_top, phys_w, phys_h
+
+
+class RegionOverlay(QWidget):
+    """Persistent on-screen border showing the selected capture region."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._border = 2
+        self.setWindowFlags(
+            Qt.WindowType.FramelessWindowHint
+            | Qt.WindowType.WindowStaysOnTopHint
+            | Qt.WindowType.Tool
+            | Qt.WindowType.X11BypassWindowManagerHint
+        )
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+
+    def set_region(self, left: int, top: int, width: int, height: int) -> None:
+        """Position overlay from physical (mss) coordinates."""
+        qt_x, qt_y, qt_w, qt_h = physical_to_qt_rect(left, top, width, height)
+        b = self._border
+        self.setGeometry(qt_x - b, qt_y - b, qt_w + 2 * b, qt_h + 2 * b)
+        self.update()
+
+    def paintEvent(self, event) -> None:
+        painter = QPainter(self)
+        b = self._border
+        pen = QPen(QColor(0, 200, 0), b)
+        painter.setPen(pen)
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        half = b // 2
+        painter.drawRect(half, half, self.width() - b, self.height() - b)
+        painter.end()
+
+
 class RegionSelector(QWidget):
     # Signal emits PHYSICAL pixel coordinates for mss
     region_selected = pyqtSignal(int, int, int, int)  # left, top, width, height

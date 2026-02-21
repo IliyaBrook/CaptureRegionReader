@@ -100,6 +100,7 @@ class HotkeyRecorder(QLineEdit):
 
 class MainWindow(QMainWindow):
     select_region_clicked = pyqtSignal()
+    show_region_toggled = pyqtSignal(bool)
     toggle_reading = pyqtSignal()
     language_changed = pyqtSignal(str)
     rate_changed = pyqtSignal(int)
@@ -170,6 +171,17 @@ class MainWindow(QMainWindow):
         )
         self._btn_select.clicked.connect(self.select_region_clicked.emit)
         region_row.addWidget(self._btn_select)
+
+        self._btn_show_region = QPushButton("Show Region")
+        self._btn_show_region.setMinimumHeight(36)
+        self._btn_show_region.setCheckable(True)
+        self._btn_show_region.setEnabled(settings.region is not None)
+        self._btn_show_region.setStyleSheet(
+            "QPushButton { font-size: 12px; }"
+            "QPushButton:checked { background-color: #2a7d2a; color: white; }"
+        )
+        self._btn_show_region.toggled.connect(self.show_region_toggled.emit)
+        region_row.addWidget(self._btn_show_region)
 
         self._lbl_region = QLabel("No region selected")
         self._lbl_region.setStyleSheet("QLabel { color: #888; font-size: 12px; }")
@@ -509,6 +521,7 @@ class MainWindow(QMainWindow):
         self.settings.region = (left, top, width, height)
         self._lbl_region.setText(f"({left}, {top}) {width}\u00d7{height}")
         self._btn_toggle.setEnabled(True)
+        self._btn_show_region.setEnabled(True)
         self._status_bar.showMessage(
             f"Region selected: ({left}, {top}) {width}\u00d7{height}"
         )

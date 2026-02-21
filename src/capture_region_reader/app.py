@@ -9,7 +9,7 @@ from PyQt6.QtWidgets import QApplication
 from capture_region_reader.hotkey_manager import HotkeyManager
 from capture_region_reader.main_window import MainWindow
 from capture_region_reader.ocr_worker import OcrWorker
-from capture_region_reader.region_selector import RegionSelector
+from capture_region_reader.region_selector import RegionOverlay, RegionSelector
 from capture_region_reader.settings import AppSettings
 from capture_region_reader.text_cleaner import clean_for_tts, filter_by_language
 from capture_region_reader.text_differ import TextDiffer
@@ -33,6 +33,7 @@ class App:
         # UI
         self._window = MainWindow(self._settings)
         self._region_selector: RegionSelector | None = None
+        self._region_overlay = RegionOverlay()
 
         self._is_reading = False
 
@@ -44,6 +45,7 @@ class App:
 
         # Region selection
         w.select_region_clicked.connect(self._on_select_region)
+        w.show_region_toggled.connect(self._on_show_region_toggled)
 
         # Toggle reading
         w.toggle_reading.connect(self._on_toggle_reading)
@@ -116,8 +118,18 @@ class App:
         self._window.on_region_selected(left, top, width, height)
         self._text_differ.reset()
         self._grab_single_preview(left, top, width, height)
+        # Update overlay position if it's currently visible
+        if self._region_overlay.isVisible():
+            self._region_overlay.set_region(left, top, width, height)
         if restart:
             self._start_reading()
+
+    def _on_show_region_toggled(self, checked: bool) -> None:
+        if checked and self._settings.region:
+            self._region_overlay.set_region(*self._settings.region)
+            self._region_overlay.show()
+        else:
+            self._region_overlay.hide()
 
     def _grab_single_preview(self, left: int, top: int, width: int, height: int) -> None:
         """Capture a single frame for the preview right after region selection.
