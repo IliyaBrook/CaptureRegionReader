@@ -16,7 +16,6 @@ dependencies = [
     "torchaudio>=2.0",
     "scipy>=1.12",
     "omegaconf>=2.3",
-    "coqui-tts>=0.27.0",
     "torchcodec>=0.1",
 ]
 

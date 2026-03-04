@@ -23,9 +23,6 @@ check-venv:
 		elif ! uv run python -c "import torchaudio" > /dev/null 2>&1; then \
 			echo "WARNING: Broken venv detected (torchaudio missing). Recreating..."; \
 			rm -rf .venv; \
-		elif ! uv run python -c "import torch; import transformers.pytorch_utils as p; p.isin_mps_friendly=torch.isin if not hasattr(p,'isin_mps_friendly') else p.isin_mps_friendly; from TTS.api import TTS" > /dev/null 2>&1; then \
-			echo "WARNING: Broken venv detected (coqui-tts missing). Recreating..."; \
-			rm -rf .venv; \
 		fi; \
 	fi
 

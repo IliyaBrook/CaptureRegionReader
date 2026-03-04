@@ -8,7 +8,6 @@ import subprocess
 import tempfile
 import time
 import wave
-from pathlib import Path
 from queue import Empty, Queue
 from typing import Protocol
 
@@ -26,12 +25,6 @@ VOICE_RU = "ru-RU-DmitryNeural"
 SILERO_MODEL_ID = "v4_ru"
 SILERO_SPEAKER = "xenia"
 SILERO_SAMPLE_RATE = 48000
-
-# XTTS v2 settings
-XTTS_MODEL_NAME = "tts_models/multilingual/multi-dataset/xtts_v2"
-XTTS_CACHE_DIR = Path.home() / ".cache" / "capture-region-reader"
-XTTS_REFERENCE_WAV = XTTS_CACHE_DIR / "xtts_reference.wav"
-XTTS_REFERENCE_TEXT = "Привет, я ваш голосовой помощник. Я буду читать текст с экрана."
 
 
 def detect_language(text: str) -> str:
@@ -216,107 +209,13 @@ class SileroTtsEngine:
 
 
 
-# ── Coqui XTTS v2 Engine (local, multilingual, GPU) ──────────────
-
-def _patch_transformers_for_xtts() -> None:
-    """Inject missing ``isin_mps_friendly`` into ``transformers.pytorch_utils``.
-
-    coqui-tts imports ``isin_mps_friendly`` which was only in a brief
-    transformers dev snapshot and never released.  On Linux/CUDA the
-    plain ``torch.isin`` is identical, so we monkey-patch it in.
-    """
-    import torch
-    import transformers.pytorch_utils as _pu
-
-    if not hasattr(_pu, "isin_mps_friendly"):
-        _pu.isin_mps_friendly = torch.isin
-
-
-class XttsTtsEngine:
-    """Coqui XTTS v2 — high-quality multilingual neural TTS.
-
-    Supports 17 languages including Russian + English.
-    English words in Russian text are read with a natural Russian accent.
-    Requires ~1.8 GB for model download on first use.
-    GPU-accelerated (falls back to CPU if CUDA unavailable).
-    """
-
-    def __init__(self) -> None:
-        self._tts = None
-
-    @property
-    def audio_suffix(self) -> str:
-        return ".wav"
-
-    def _ensure_reference_voice(self) -> str:
-        """Ensure a reference voice WAV exists; auto-generate via edge-tts if not."""
-        ref_path = XTTS_REFERENCE_WAV
-        if ref_path.exists():
-            return str(ref_path)
-
-        XTTS_CACHE_DIR.mkdir(parents=True, exist_ok=True)
-        print("[XTTS] Generating reference voice via Edge-TTS (one-time)...")
-
-        import edge_tts
-
-        loop = asyncio.new_event_loop()
-        mp3_path = str(ref_path.with_suffix(".mp3"))
-        try:
-            comm = edge_tts.Communicate(XTTS_REFERENCE_TEXT, VOICE_RU)
-            loop.run_until_complete(comm.save(mp3_path))
-        finally:
-            loop.close()
-
-        # Convert MP3 → WAV (22050 Hz mono) for XTTS compatibility
-        subprocess.run(
-            ["ffmpeg", "-i", mp3_path, "-ar", "22050", "-ac", "1",
-             str(ref_path), "-y"],
-            capture_output=True, check=True,
-        )
-        os.unlink(mp3_path)
-        print(f"[XTTS] Reference voice saved to {ref_path}")
-        return str(ref_path)
-
-    def _ensure_loaded(self) -> None:
-        """Lazy-load XTTS v2 model on first use."""
-        if self._tts is not None:
-            return
-
-        import torch
-
-        _patch_transformers_for_xtts()
-        from TTS.api import TTS
-
-        gpu = torch.cuda.is_available()
-        print(f"[XTTS] Loading {XTTS_MODEL_NAME} (GPU: {gpu})...")
-        self._tts = TTS(XTTS_MODEL_NAME, gpu=gpu)
-        print("[XTTS] Model loaded")
-
-    def generate(self, text: str, lang: str, output_path: str) -> None:
-        self._ensure_loaded()
-        ref_wav = self._ensure_reference_voice()
-
-        # XTTS natively handles mixed RU+EN text; use detected language
-        xtts_lang = "ru" if lang == "ru" else "en"
-
-        self._tts.tts_to_file(
-            text=text,
-            file_path=output_path,
-            speaker_wav=ref_wav,
-            language=xtts_lang,
-        )
-
-    def close(self) -> None:
-        self._tts = None
-
-
 # ── Engine factory ─────────────────────────────────────────────────
 
 def create_tts_engine(name: str) -> TtsEngine:
     """Create a TTS engine by name.
 
     Args:
-        name: "edge-tts", "silero", or "xtts".
+        name: "edge-tts" or "silero".
 
     Returns:
         A TTS engine instance.
@@ -331,10 +230,6 @@ def create_tts_engine(name: str) -> TtsEngine:
     if name == "edge-tts":
         import edge_tts  # noqa: F401
         return EdgeTtsEngine()
-    if name == "xtts":
-        _patch_transformers_for_xtts()
-        from TTS.api import TTS as _TTS  # noqa: F401
-        return XttsTtsEngine()
     raise ValueError(f"Unknown TTS engine: {name}")
 
 
